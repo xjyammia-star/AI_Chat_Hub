@@ -5,6 +5,7 @@ import { useAuthStore } from '@/lib/auth'
 import AuthPage from '@/pages/AuthPage'
 import ChatPage from '@/pages/ChatPage'
 import AdminPage from '@/pages/AdminPage'
+import SettingsPage from '@/pages/SettingsPage'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const user = useAuthStore((s) => s.user)
@@ -56,6 +57,14 @@ export default function App() {
             <AdminRoute>
               <AdminPage />
             </AdminRoute>
+          }
+        />
+        <Route
+          path="/settings"
+          element={
+            <ProtectedRoute>
+              <SettingsPage />
+            </ProtectedRoute>
           }
         />
         <Route path="*" element={<Navigate to="/" replace />} />
