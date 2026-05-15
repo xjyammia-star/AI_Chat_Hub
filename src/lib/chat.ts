@@ -6,6 +6,27 @@ import { create } from 'zustand'
 import type { ChatState, ChatSession, ChatMessage, ChatMode } from '@/types'
 import { apiRequest } from './auth'
 
+// 浏览器直接调用本地 Ollama
+async function callOllamaLocal(params: {
+  name: string, avatar: string, model: string,
+  base_url: string, system_prompt?: string,
+  messages: Array<{ role: string; content: string }>
+}): Promise<string> {
+  const { model, base_url, system_prompt, messages } = params
+  const allMessages = system_prompt
+    ? [{ role: 'system', content: system_prompt }, ...messages]
+    : messages
+  const url = `${base_url.replace(/\/v1$/, '')}/api/chat`
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, messages: allMessages, stream: false }),
+  })
+  if (!resp.ok) throw new Error(`Ollama ${resp.status} — 请确认已设置 OLLAMA_ORIGINS=* 并重启`)
+  const data = await resp.json()
+  return data.message?.content || ''
+}
+
 export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
   currentSession: null,
@@ -99,7 +120,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (!res.ok) throw new Error('发送失败')
       const data = await res.json()
 
-      // 替换占位消息，加入真实 AI 回复
+      // 替换占位消息，加入服务端 AI 回复
       set((state) => ({
         messages: [
           ...state.messages.filter((m) => !m.metadata?.thinking),
@@ -107,6 +128,58 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ],
         isSending: false,
       }))
+
+      // 如果有本地 AI 需要前端直接调用
+      if (data.local_ai_calls && data.local_ai_calls.length > 0) {
+        const sessionMessages = get().messages
+          .filter((m) => m.sender_type !== 'system' && !m.metadata?.thinking)
+          .map((m) => ({ role: m.sender_type === 'user' ? 'user' : 'assistant', content: m.content }))
+
+        for (const localAI of data.local_ai_calls) {
+          // 添加思考中占位
+          const thinkingId = `thinking-local-${localAI.id}`
+          set((state) => ({
+            messages: [...state.messages, {
+              id: thinkingId, session_id: currentSession!.id,
+              sender_type: 'ai' as const, sender_name: localAI.name,
+              sender_avatar: localAI.avatar, content: '...',
+              metadata: { thinking: true }, created_at: new Date().toISOString(),
+            }]
+          }))
+
+          try {
+            const reply = await callOllamaLocal({
+              name: localAI.name, avatar: localAI.avatar,
+              model: localAI.model, base_url: localAI.base_url,
+              system_prompt: localAI.system_prompt,
+              messages: sessionMessages,
+            })
+            const localMsg: ChatMessage = {
+              id: `local-${localAI.id}-${Date.now()}`,
+              session_id: currentSession!.id,
+              sender_type: 'ai', sender_id: localAI.id,
+              sender_name: localAI.name, sender_avatar: localAI.avatar,
+              content: reply, metadata: { model: localAI.model },
+              created_at: new Date().toISOString(),
+            }
+            set((state) => ({
+              messages: [...state.messages.filter((m) => m.id !== thinkingId), localMsg]
+            }))
+          } catch (err) {
+            const errMsg: ChatMessage = {
+              id: `local-err-${localAI.id}-${Date.now()}`,
+              session_id: currentSession!.id,
+              sender_type: 'ai', sender_name: localAI.name,
+              sender_avatar: localAI.avatar,
+              content: `❌ 本地模型调用失败: ${(err as Error).message}`,
+              created_at: new Date().toISOString(),
+            }
+            set((state) => ({
+              messages: [...state.messages.filter((m) => m.id !== thinkingId), errMsg]
+            }))
+          }
+        }
+      }
 
       // 更新会话列表（刷新 updated_at）
       get().loadSessions()
