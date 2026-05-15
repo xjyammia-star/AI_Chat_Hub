@@ -2,6 +2,7 @@
   "name": "ai-chat-hub",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -p tsconfig.app.json && vite build",
