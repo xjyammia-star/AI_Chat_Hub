@@ -66,12 +66,34 @@ async function callAI(params: AICallParams): Promise<string> {
     return data.candidates?.[0]?.content?.parts?.[0]?.text || ''
   }
 
-  // OpenAI 兼容格式（DeepSeek / Doubao / GLM / OpenAI / Ollama）
+  // GLM 需要动态生成 JWT Token
+  let authToken = apiKey || ''
+  if (provider === 'glm' && apiKey && apiKey.includes('.')) {
+    const [id, secret] = apiKey.split('.')
+    const now = Date.now()
+    const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT', sign_type: 'SIGN' }))
+    const payload = btoa(JSON.stringify({ api_key: id, exp: now + 3600000, timestamp: now }))
+    const { createHmac } = await import('crypto')
+    const sig = createHmac('sha256', secret).update(`${header}.${payload}`).digest('base64url')
+    authToken = `${header}.${payload}.${sig}`
+  }
+
+  // Ollama 本地调用 — 注意：Ollama 在浏览器端直连，这里是服务端备用路径
+  if (provider === 'ollama') {
+    const ollamaUrl = `${baseUrl.replace('/v1', '')}/api/chat`
+    const ollamaBody = { model, messages: allMessages, stream: false }
+    const resp = await fetch(ollamaUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(ollamaBody) })
+    if (!resp.ok) throw new Error(`Ollama error ${resp.status} — 请确认本地 Ollama 已启动并设置 OLLAMA_ORIGINS=*`)
+    const data = await resp.json()
+    return data.message?.content || ''
+  }
+
+  // OpenAI 兼容格式（DeepSeek / Doubao / OpenAI / GLM）
   const url = `${baseUrl}/chat/completions`
   const body = { model, messages: allMessages, max_tokens: maxTokens, temperature }
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`
+  if (authToken) headers['Authorization'] = `Bearer ${authToken}`
 
   const resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) })
   const data = await resp.json()
@@ -163,7 +185,24 @@ export default requireAuth(async (req, res, authUser) => {
       return getAIConfig(memberId, memberType, authUser.id)
     })
   )
-  const validAIs = aiConfigs.filter(Boolean) as NonNullable<Awaited<ReturnType<typeof getAIConfig>>>[]
+  const allAIs = aiConfigs.filter(Boolean) as NonNullable<Awaited<ReturnType<typeof getAIConfig>>>[]
+
+  // 本地模型由前端直接调用，这里只处理非本地的
+  const localAIs = allAIs.filter(ai => ai.is_local)
+  const validAIs = allAIs.filter(ai => !ai.is_local)
+
+  // 如果全是本地模型，直接返回让前端处理
+  if (localAIs.length > 0 && validAIs.length === 0) {
+    return res.json({
+      messages: [userMsg],
+      session_id,
+      local_ai_calls: localAIs.map(ai => ({
+        id: ai.id, name: ai.name, avatar: ai.avatar,
+        model: ai.model, base_url: ai.baseUrl || 'http://localhost:11434',
+        system_prompt: ai.systemPrompt,
+      }))
+    })
+  }
 
   if (validAIs.length === 0) {
     const errorMsg = await saveMessage(session_id, 'system', null, 'system', null, '⚠️ 没有可用的 AI 成员，请在右上角选择至少一个 AI')
@@ -394,5 +433,13 @@ export default requireAuth(async (req, res, authUser) => {
     resultMessages.push(errMsg)
   }
 
-  return res.json({ messages: resultMessages, session_id })
+  return res.json({
+    messages: resultMessages,
+    session_id,
+    local_ai_calls: localAIs.length > 0 ? localAIs.map(ai => ({
+      id: ai.id, name: ai.name, avatar: ai.avatar,
+      model: ai.model, base_url: ai.baseUrl || 'http://localhost:11434',
+      system_prompt: ai.systemPrompt,
+    })) : undefined
+  })
 })
