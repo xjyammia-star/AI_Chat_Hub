@@ -161,7 +161,7 @@ export default function ChatArea() {
           <div style={{ position: 'relative' }}>
             <button className="btn btn-ghost" style={{ gap: 6, fontSize: 13 }}
               onClick={() => { setShowMemberMenu(!showMemberMenu); setShowModeMenu(false) }}>
-              <Users size={14} /> 成员 ({selectedAIIds.length})
+              <Users size={14} /> 成员 ({new Set(selectedAIIds.map(id => id.replace(':user', ''))).size})
             </button>
             {showMemberMenu && (
               <MemberDropdown members={aiMembers} selected={selectedAIIds} onToggle={toggleAIMember}
@@ -333,7 +333,7 @@ function MemberDropdown({ members, selected, onToggle, onClose, onManage }: {
         <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 8px 8px', fontWeight: 500 }}>选择参与的 AI 成员</div>
         {members.length === 0 && <div style={{ padding: '8px', fontSize: 12, color: 'var(--text-muted)' }}>暂无可用 AI 成员</div>}
         {members.map((m) => (
-          <div key={m.id} onClick={() => onToggle(m.id)}
+          <div key={m.id} onClick={() => onToggle(m.type === 'user' ? `${m.id}:user` : m.id)}
             style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px', borderRadius: 8, cursor: 'pointer', background: selected.includes(m.id) ? 'var(--accent-glow)' : 'transparent', border: selected.includes(m.id) ? '1px solid rgba(99,102,241,0.3)' : '1px solid transparent', marginBottom: 2 }}>
             <div style={{ fontSize: 20 }}>{m.custom_avatar || m.avatar}</div>
             <div style={{ flex: 1 }}>
