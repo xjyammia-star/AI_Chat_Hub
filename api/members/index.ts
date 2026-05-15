@@ -2,9 +2,9 @@
 // 获取当前用户可用的 AI 成员列表
 
 import type { VercelRequest, VercelResponse } from '@vercel/node'
-import { requireAuth } from '../_lib/middleware'
-import sql from '../_lib/db'
-import { decryptKey } from '../_lib/crypto'
+import { requireAuth } from '../_lib/middleware.js'
+import sql from '../_lib/db.js'
+import { decryptKey } from '../_lib/crypto.js'
 
 export default requireAuth(async (req, res, authUser) => {
   if (req.method === 'GET') {
