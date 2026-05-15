@@ -124,7 +124,23 @@ async function getAIConfig(memberId: string, memberType: string, userId: string)
   `
 
   const apiKey = member.api_key_enc ? decryptKey(member.api_key_enc as string) : undefined
-  const systemPrompt = config?.custom_prompt || config?.role_prompt || undefined
+
+  // ---- 群聊基础提示词 ----
+  const groupChatPrompt = `你正在参与一个多AI群聊对话。群里有多个来自不同公司的AI助手同时在线，大家共同回应用户的消息。
+
+【群聊基本规则】
+1. 你只需回复用户最新发送的消息，不要重复其他AI已经说过的内容。
+2. 保持回复简洁，避免长篇大论——这是群聊，不是独占的问答场景。
+3. 可以对其他AI的观点进行补充或礼貌地提出不同看法，但不要攻击或贬低其他AI。
+4. 不要假装自己是唯一的AI，也不要否认群里存在其他AI。
+5. 如果其他AI已经完整回答了问题，你可以补充一个角度或简短表示认同，无需重复。
+6. 保持友好、自然的对话风格，像群聊成员一样参与。`
+
+  // 角色设定拼接在群聊规则后面
+  const rolePrompt = config?.custom_prompt || config?.role_prompt
+  const systemPrompt = rolePrompt
+    ? `${groupChatPrompt}\n\n【你的角色设定】\n${rolePrompt}`
+    : groupChatPrompt
 
   return {
     id: member.id as string,
@@ -380,7 +396,7 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
             apiKey: ai.apiKey,
             baseUrl: ai.baseUrl,
             messages: [{ role: 'user', content }],
-            systemPrompt: `你是「${dimensions[idx] || `专家${idx + 1}`}」领域的专家。请从 ${dimensions[idx]} 角度深入分析用户的问题，提供专业的分析报告。`,
+            systemPrompt: `${ai.systemPrompt}\n\n你是「${dimensions[idx] || `专家${idx + 1}`}」领域的专家。请从 ${dimensions[idx]} 角度深入分析用户的问题，提供专业的分析报告。`,
             maxTokens: (cfg.max_tokens_per_expert as number) || 800,
           })
         )
@@ -405,7 +421,7 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
         apiKey: judge.apiKey,
         baseUrl: judge.baseUrl,
         messages: [{ role: 'user', content: judgePrompt }],
-        systemPrompt: '你是最终裁决者，请整合所有专家意见，做出明确的最终判断和建议。',
+        systemPrompt: judge.systemPrompt,
         maxTokens: (cfg.max_tokens_judge as number) || 1200,
       })
 
