@@ -34,7 +34,7 @@ export default function ChatArea() {
         const data = await res.json()
         setAiMembers(data.members)
         // 去重后设置
-        const enabledIds = Array.from(new Set(
+        const enabledIds: string[] = Array.from(new Set<string>(
           data.members
             .filter((m: AIMember) => m.is_enabled)
             .map((m: AIMember) => m.type === 'user' ? `${m.id}:user` : m.id)
