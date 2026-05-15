@@ -18,8 +18,26 @@ interface AICallParams {
   temperature?: number
 }
 
+// 每个提供商的默认 base_url
+const DEFAULT_BASE_URLS: Record<string, string> = {
+  gemini:    'https://generativelanguage.googleapis.com/v1beta',
+  deepseek:  'https://api.deepseek.com/v1',
+  doubao:    'https://ark.cn-beijing.volces.com/api/v3',
+  glm:       'https://open.bigmodel.cn/api/paas/v4',
+  openai:    'https://api.openai.com/v1',
+  anthropic: 'https://api.anthropic.com/v1',
+  ollama:    'http://localhost:11434/v1',
+  custom:    '',
+}
+
 async function callAI(params: AICallParams): Promise<string> {
-  const { provider, model, apiKey, baseUrl, messages, systemPrompt, maxTokens = 1500, temperature = 0.7 } = params
+  const { provider, model, apiKey, messages, systemPrompt, maxTokens = 1500, temperature = 0.7 } = params
+  // 优先用用户填写的 base_url，否则用默认值
+  const baseUrl = (params.baseUrl && params.baseUrl !== 'null' && params.baseUrl.trim() !== '')
+    ? params.baseUrl.trim()
+    : DEFAULT_BASE_URLS[provider] || ''
+
+  if (!baseUrl) throw new Error(`未知提供商 ${provider}，请填写 API Base URL`)
 
   const allMessages = systemPrompt
     ? [{ role: 'system', content: systemPrompt }, ...messages]
@@ -27,7 +45,7 @@ async function callAI(params: AICallParams): Promise<string> {
 
   // Gemini 格式
   if (provider === 'gemini') {
-    const url = `${baseUrl || 'https://generativelanguage.googleapis.com/v1beta'}/models/${model}:generateContent?key=${apiKey}`
+    const url = `${baseUrl}/models/${model}:generateContent?key=${apiKey}`
     const contents = allMessages
       .filter((m) => m.role !== 'system')
       .map((m) => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] }))
@@ -181,7 +199,7 @@ export default requireAuth(async (req, res, authUser) => {
         const ai = validAIs[i]
         const result = replies[i]
         const content = result.status === 'fulfilled' ? result.value : `❌ 调用失败: ${(result.reason as Error).message}`
-        const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, content, undefined, { model: ai.model })
+        const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, content, undefined, { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model })
         resultMessages.push(msg)
       }
 
