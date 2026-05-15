@@ -33,14 +33,14 @@ export default function ChatArea() {
       if (res.ok) {
         const data = await res.json()
         setAiMembers(data.members)
-        // 直接用 useChatStore.getState() 避免闭包问题
-        const state = useChatStore.getState()
-        const currentSelected = state.selectedAIIds
+        // 自动选中所有可用成员，私人AI带 :user 后缀
         data.members
           .filter((m: AIMember) => m.is_enabled)
           .forEach((m: AIMember) => {
-            if (!currentSelected.includes(m.id)) {
-              state.toggleAIMember(m.id)
+            const id = m.type === 'user' ? `${m.id}:user` : m.id
+            const current = useChatStore.getState().selectedAIIds
+            if (!current.includes(id) && !current.includes(m.id)) {
+              useChatStore.getState().toggleAIMember(id)
             }
           })
       }
