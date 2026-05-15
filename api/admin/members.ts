@@ -1,9 +1,9 @@
 // api/admin/members.ts — 管理员 AI 成员管理
 
 import type { VercelRequest, VercelResponse } from '@vercel/node'
-import { requireAdmin } from '../_lib/middleware'
-import sql from '../_lib/db'
-import { encryptKey } from '../_lib/crypto'
+import { requireAdmin } from '../_lib/middleware.js'
+import sql from '../_lib/db.js'
+import { encryptKey } from '../_lib/crypto.js'
 
 export default requireAdmin(async (req, res, authUser) => {
   if (req.method === 'GET') {
