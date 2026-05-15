@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Plus, Archive, Settings, Search, ChevronDown, ChevronRight, Edit2, Trash2, Pin, LogOut, Shield } from 'lucide-react'
+import { Plus, Archive, Settings, Search, ChevronDown, ChevronRight, Edit2, Trash2, Pin, LogOut, Shield, SlidersHorizontal } from 'lucide-react'
 import { useChatStore } from '@/lib/chat'
 import { useAuthStore } from '@/lib/auth'
 import type { ChatSession, ChatMode } from '@/types'
@@ -100,6 +100,9 @@ export default function Sidebar() {
         <div style={{ display: 'flex', gap: 8 }}>
           <button className="btn btn-ghost" style={{ padding: '6px 10px' }} onClick={handleNew} title="新对话">
             <Plus size={16} />
+          </button>
+          <button className="btn btn-ghost" style={{ padding: '6px 10px' }} onClick={() => navigate('/settings')} title="设置">
+            <SlidersHorizontal size={16} />
           </button>
           {user?.role === 'admin' && (
             <button className="btn btn-ghost" style={{ padding: '6px 10px' }} onClick={() => navigate('/admin')} title="管理后台">
