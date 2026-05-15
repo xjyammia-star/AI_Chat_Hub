@@ -5,7 +5,7 @@ import { requireAdmin } from '../_lib/middleware.js'
 import sql from '../_lib/db.js'
 import { encryptKey } from '../_lib/crypto.js'
 
-export default requireAdmin(async (req, res, authUser) => {
+export default requireAdmin(async (req, res, authUser): Promise<void> => {
   if (req.method === 'GET') {
     const members = await sql`SELECT id, name, avatar, provider, model, base_url, is_public, allowed_users, is_enabled, sort_order, created_at FROM system_ai_members ORDER BY sort_order, created_at`
     return res.json({ members })
