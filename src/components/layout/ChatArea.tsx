@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import { Send, Settings2, Users, Zap, Crown, Target, Eye, Radio } from 'lucide-react'
+import { Send, Settings2, Users, Zap, Crown, Target, Eye, Radio, UserPlus } from 'lucide-react'
 import TextareaAutosize from 'react-textarea-autosize'
 import { useChatStore } from '@/lib/chat'
 import type { ChatMessage, ChatMode, AIMember } from '@/types'
 import { apiRequest } from '@/lib/auth'
 import toast from 'react-hot-toast'
+import UserAIModal from '@/components/members/UserAIModal'
 
 const MODE_INFO: Record<ChatMode, { icon: React.ElementType; label: string; desc: string; color: string }> = {
   normal:   { icon: Zap,     label: '普通对话',  desc: '直接对话',        color: '#818cf8' },
@@ -20,6 +21,7 @@ export default function ChatArea() {
   const [aiMembers, setAiMembers] = useState<AIMember[]>([])
   const [showModeMenu, setShowModeMenu] = useState(false)
   const [showMemberMenu, setShowMemberMenu] = useState(false)
+  const [showUserAIModal, setShowUserAIModal] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
 
   // 加载 AI 成员列表
@@ -117,6 +119,7 @@ export default function ChatArea() {
                 selected={selectedAIIds}
                 onToggle={toggleAIMember}
                 onClose={() => setShowMemberMenu(false)}
+                onManage={() => setShowUserAIModal(true)}
               />
             )}
           </div>
@@ -208,6 +211,16 @@ export default function ChatArea() {
           </button>
         </div>
       </div>
+      {showUserAIModal && (
+        <UserAIModal
+          onClose={() => setShowUserAIModal(false)}
+          onSaved={() => {
+            apiRequest('/members').then(async (res) => {
+              if (res.ok) { const data = await res.json(); setAiMembers(data.members) }
+            })
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -276,11 +289,12 @@ function MessageRow({ message }: { message: ChatMessage }) {
 }
 
 // 成员选择下拉
-function MemberDropdown({ members, selected, onToggle, onClose }: {
+function MemberDropdown({ members, selected, onToggle, onClose, onManage }: {
   members: AIMember[]
   selected: string[]
   onToggle: (id: string) => void
   onClose: () => void
+  onManage: () => void
 }) {
   return (
     <>
@@ -333,6 +347,17 @@ function MemberDropdown({ members, selected, onToggle, onClose }: {
             <div className={`status-dot ${m.is_available ? 'online' : 'offline'}`} />
           </div>
         ))}
+        <div className="divider" style={{ margin: '6px 0' }} />
+        <div
+          onClick={() => { onClose(); onManage() }}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 8,
+            padding: '8px', borderRadius: 8, cursor: 'pointer',
+            color: 'var(--accent-hover)', fontSize: 13,
+          }}
+        >
+          <UserPlus size={14} /> 管理私人 AI
+        </div>
       </div>
     </>
   )
