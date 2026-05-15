@@ -225,10 +225,19 @@ function AIMembersSettings() {
 // 对话模式设置
 // ============================================================
 function ChatModesSettings() {
-  const [modes, setModes] = useState<Record<string, unknown>[]>([])
+  interface ChatModeRecord {
+    id: string
+    mode_key: string
+    mode_name: string
+    description: string
+    config: Record<string, unknown>
+    is_enabled: boolean
+    created_at: string
+  }
+  const [modes, setModes] = useState<ChatModeRecord[]>([])
   const [members, setMembers] = useState<AIMember[]>([])
   const [expandedId, setExpandedId] = useState<string | null>(null)
-  const [editingMode, setEditingMode] = useState<Record<string, unknown> | null>(null)
+  const [editingMode, setEditingMode] = useState<ChatModeRecord | null>(null)
   const [showAddMode, setShowAddMode] = useState(false)
   const [newMode, setNewMode] = useState({
     mode_key: '', mode_name: '', description: '',
@@ -246,14 +255,10 @@ function ChatModesSettings() {
 
   useEffect(() => { load() }, [])
 
-  const handleSaveMode = async (mode: Record<string, unknown>) => {
-    let config = mode.config
-    if (typeof config === 'string') {
-      try { config = JSON.parse(config as string) } catch { return toast.error('JSON 格式错误') }
-    }
+  const handleSaveMode = async (mode: ChatModeRecord) => {
     const res = await apiRequest('/settings/modes', {
       method: 'PUT',
-      body: JSON.stringify({ id: mode.id, mode_name: mode.mode_name, description: mode.description, config, is_enabled: mode.is_enabled }),
+      body: JSON.stringify({ id: mode.id, mode_name: mode.mode_name, description: mode.description, config: mode.config, is_enabled: mode.is_enabled }),
     })
     if (res.ok) { toast.success('保存成功'); setEditingMode(null); load() }
     else toast.error('保存失败')
@@ -347,37 +352,37 @@ function ChatModesSettings() {
           const config = typeof mode.config === 'string' ? mode.config : JSON.stringify(mode.config, null, 2)
 
           return (
-            <div key={mode.id as string} className="card">
+            <div key={mode.id} className="card">
               {/* 模式头部 */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <div style={{ flex: 1 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span style={{ fontWeight: 500 }}>{mode.mode_name as string}</span>
+                    <span style={{ fontWeight: 500 }}>{mode.mode_name}</span>
                     <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'monospace', background: 'var(--bg-input)', padding: '1px 8px', borderRadius: 6 }}>
-                      {mode.mode_key as string}
+                      {mode.mode_key}
                     </span>
                     {isBuiltin && <span style={{ fontSize: 11, color: 'var(--text-muted)', border: '1px solid var(--border)', padding: '1px 6px', borderRadius: 10 }}>内置</span>}
                     <span style={{ fontSize: 11, padding: '1px 8px', borderRadius: 10, background: mode.is_enabled ? 'rgba(16,185,129,0.1)' : 'rgba(107,114,128,0.1)', color: mode.is_enabled ? 'var(--green)' : 'var(--text-muted)' }}>
-                      {mode.is_enabled ? '启用' : '已禁用'}
+                      {mode.is_enabled ? '启用' : '已禁用' as string}
                     </span>
                   </div>
-                  {mode.description && <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>{mode.description as string}</div>}
+                  {mode.description && <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>{mode.description}</div>}
                 </div>
                 <div style={{ display: 'flex', gap: 6 }}>
                   <button className="btn btn-ghost" style={{ fontSize: 12, padding: '4px 8px' }}
-                    onClick={() => handleToggleMode(mode.id as string, mode.is_enabled as boolean)}>
+                    onClick={() => handleToggleMode(mode.id, mode.is_enabled)}>
                     {mode.is_enabled ? '禁用' : '启用'}
                   </button>
                   <button className="btn btn-ghost" style={{ padding: '4px 8px' }}
                     onClick={() => {
-                      setExpandedId(isExpanded ? null : mode.id as string)
+                      setExpandedId(isExpanded ? null : mode.id)
                       setEditingMode(isExpanded ? null : { ...mode, config })
                     }}>
                     {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                   </button>
                   {!isBuiltin && (
                     <button className="btn btn-danger" style={{ padding: '4px 8px' }}
-                      onClick={() => handleDeleteMode(mode.id as string, mode.mode_key as string)}>
+                      onClick={() => handleDeleteMode(mode.id, mode.mode_key)}>
                       <Trash2 size={13} />
                     </button>
                   )}
@@ -404,7 +409,7 @@ function ChatModesSettings() {
                   <div style={{ marginBottom: 12 }}>
                     <label className="form-label">AI 角色分配（在此模式中各 AI 担任什么职责）</label>
                     <ModeRoleAssigner
-                      modeKey={mode.mode_key as string}
+                      modeKey={mode.mode_key}
                       members={members}
                       config={typeof editingMode.config === 'string' ? (() => { try { return JSON.parse(editingMode.config as string) } catch { return {} } })() : editingMode.config as Record<string, unknown>}
                       onChange={(newConfig) => setEditingMode({ ...editingMode, config: JSON.stringify(newConfig, null, 2) })}
@@ -420,8 +425,15 @@ function ChatModesSettings() {
                       </span>
                     </label>
                     <textarea className="form-input" rows={8}
-                      value={typeof editingMode.config === 'string' ? editingMode.config as string : JSON.stringify(editingMode.config, null, 2)}
-                      onChange={(e) => setEditingMode({ ...editingMode, config: e.target.value })}
+                      value={JSON.stringify(editingMode.config, null, 2)}
+                      onChange={(e) => {
+                      try {
+                        const parsed = JSON.parse(e.target.value)
+                        setEditingMode({ ...editingMode, config: parsed })
+                      } catch {
+                        // Keep as is while typing
+                      }
+                    }}
                       style={{ fontFamily: 'monospace', fontSize: 12, resize: 'vertical' }} />
                   </div>
 
