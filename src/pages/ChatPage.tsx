@@ -8,7 +8,7 @@ export default function ChatPage() {
 
   useEffect(() => {
     loadSessions()
-  }, [loadSessions])
+  }, [])  // 只在挂载时执行一次
 
   return (
     <div
