@@ -191,12 +191,36 @@ export default requireAuth(async (req, res, authUser) => {
   const localAIs = allAIs.filter(ai => ai.is_local)
   const validAIs = allAIs.filter(ai => !ai.is_local)
 
-  // 如果全是本地模型，直接返回让前端处理
-  if (localAIs.length > 0 && validAIs.length === 0) {
+  // 处理 @ 提及：先判断是否有 @ 特定成员
+  const mentionMatch = content.match(/@([^\s@]+)/)
+  const mentionedName = mentionMatch && mentionMatch[1] !== '所有人' ? mentionMatch[1] : null
+
+  // 过滤本地AI（@ 过滤）
+  let activeLocalAIs = localAIs
+  if (mentionedName) {
+    const mentionedLocal = localAIs.filter(ai =>
+      ai.name.includes(mentionedName) || mentionedName.includes(ai.name)
+    )
+    if (mentionedLocal.length > 0) activeLocalAIs = mentionedLocal
+    else activeLocalAIs = []  // @ 的是服务端AI，本地AI不参与
+  }
+
+  // 过滤服务端AI（@ 过滤）
+  let activeAIs = validAIs
+  if (mentionedName) {
+    const mentionedServer = validAIs.filter(ai =>
+      ai.name.includes(mentionedName) || mentionedName.includes(ai.name)
+    )
+    if (mentionedServer.length > 0) activeAIs = mentionedServer
+    else activeAIs = []  // @ 的是本地AI，服务端AI不参与
+  }
+
+  // 如果只有本地模型需要回复
+  if (activeLocalAIs.length > 0 && activeAIs.length === 0) {
     return res.json({
       messages: [userMsg],
       session_id,
-      local_ai_calls: localAIs.map(ai => ({
+      local_ai_calls: activeLocalAIs.map(ai => ({
         id: ai.id, name: ai.name, avatar: ai.avatar,
         model: ai.model, base_url: ai.baseUrl || 'http://localhost:11434',
         system_prompt: ai.systemPrompt,
@@ -204,20 +228,9 @@ export default requireAuth(async (req, res, authUser) => {
     })
   }
 
-  if (validAIs.length === 0) {
+  if (activeAIs.length === 0 && activeLocalAIs.length === 0) {
     const errorMsg = await saveMessage(session_id, 'system', null, 'system', null, '⚠️ 没有可用的 AI 成员，请在右上角选择至少一个 AI')
     return res.json({ messages: [userMsg, errorMsg] })
-  }
-
-  // 处理 @ 提及：如果消息中包含 @成员名，只让被@的成员回复
-  const mentionMatch = content.match(/@([^\s@]+)/)
-  let activeAIs = validAIs
-  if (mentionMatch && mentionMatch[1] !== '所有人') {
-    const mentionedName = mentionMatch[1]
-    const mentioned = validAIs.filter(ai =>
-      ai.name.includes(mentionedName) || mentionedName.includes(ai.name)
-    )
-    if (mentioned.length > 0) activeAIs = mentioned
   }
 
   // 获取模式配置
