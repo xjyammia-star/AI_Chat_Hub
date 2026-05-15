@@ -148,14 +148,22 @@ function AIManagerPanel() {
             </div>
             <div>
               <label className="form-label">模型 *</label>
-              {providerInfo?.models.length > 0 ? (
-                <select className="form-input" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })}>
-                  <option value="">选择模型</option>
+              {providerInfo?.models.length > 0 && (
+                <select
+                  className="form-input"
+                  style={{ marginBottom: 6 }}
+                  onChange={(e) => { if (e.target.value) setForm({ ...form, model: e.target.value }) }}
+                >
+                  <option value="">从常用模型选择…</option>
                   {providerInfo.models.map((m) => <option key={m} value={m}>{m}</option>)}
                 </select>
-              ) : (
-                <input className="form-input" placeholder="手动输入模型名" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
               )}
+              <input
+                className="form-input"
+                placeholder="手动输入模型名或接入点 ID，如 ep-20241234-xxxxx"
+                value={form.model}
+                onChange={(e) => setForm({ ...form, model: e.target.value })}
+              />
             </div>
             <div style={{ gridColumn: '1/-1' }}>
               <label className="form-label">API Key {providerInfo?.requiresKey ? '*' : '(本地模型无需填写)'}</label>
