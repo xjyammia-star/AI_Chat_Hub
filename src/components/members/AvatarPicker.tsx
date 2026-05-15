@@ -43,13 +43,18 @@ export default function AvatarPicker({ value, onChange }: Props) {
         </button>
         <input
           className="form-input"
-          placeholder="或直接输入 emoji"
+          placeholder="直接输入或粘贴 emoji，如 🦁"
           value={custom}
           onChange={(e) => {
-            setCustom(e.target.value)
-            if (e.target.value) onChange(e.target.value)
+            const val = e.target.value
+            setCustom(val)
+            // 取第一个字符（支持emoji）
+            if (val) {
+              const chars = [...val]
+              onChange(chars[0])
+            }
           }}
-          style={{ width: 140 }}
+          style={{ width: 180, fontSize: 18 }}
         />
       </div>
 
