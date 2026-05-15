@@ -6,7 +6,7 @@ import { requireAuth } from '../_lib/middleware.js'
 import sql from '../_lib/db.js'
 import { decryptKey } from '../_lib/crypto.js'
 
-export default requireAuth(async (req, res, authUser) => {
+export default requireAuth(async (req, res, authUser): Promise<void> => {
   if (req.method === 'GET') {
     // 1. 获取系统 AI（管理员开放给该用户的）
     const systemMembers = await sql`
