@@ -1,8 +1,8 @@
 // api/admin/users.ts
 
 import type { VercelRequest, VercelResponse } from '@vercel/node'
-import { requireAdmin } from '../_lib/middleware'
-import sql from '../_lib/db'
+import { requireAdmin } from '../_lib/middleware.js'
+import sql from '../_lib/db.js'
 
 export default requireAdmin(async (req, res) => {
   if (req.method === 'GET') {
