@@ -177,14 +177,34 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
     content: m.content,
   }))
 
-  // 获取选中的 AI 成员配置
-  const aiConfigs = await Promise.all(
-    selected_ai_ids.map(async (id: string) => {
-      const parts = id.split(':')
-      const [memberId, memberType = 'system'] = parts.length >= 2 ? [parts[0], parts[1]] : [id, 'system']
-      return getAIConfig(memberId, memberType, authUser.id)
-    })
-  )
+  // 获取 AI 成员配置
+  // 如果前端传了 selected_ai_ids 就用，否则自动获取该用户所有可用 AI
+  let aiConfigs
+  if (selected_ai_ids && selected_ai_ids.length > 0) {
+    aiConfigs = await Promise.all(
+      selected_ai_ids.map(async (id: string) => {
+        const parts = id.split(':')
+        const [memberId, memberType = 'system'] = parts.length >= 2 ? [parts[0], parts[1]] : [id, 'system']
+        return getAIConfig(memberId, memberType, authUser.id)
+      })
+    )
+  } else {
+    // 自动获取该用户所有可用的 AI（系统 + 私人）
+    const systemRows = await sql`
+      SELECT id FROM system_ai_members
+      WHERE is_enabled = true AND (is_public = true OR ${authUser.id}::uuid = ANY(allowed_users) OR ${authUser.role} = 'admin')
+    `
+    const userRows = await sql`
+      SELECT id FROM user_ai_members WHERE user_id = ${authUser.id} AND is_enabled = true
+    `
+    const allIds = [
+      ...systemRows.map((r: Record<string, string>) => ({ id: r.id, type: 'system' })),
+      ...userRows.map((r: Record<string, string>) => ({ id: r.id, type: 'user' })),
+    ]
+    aiConfigs = await Promise.all(
+      allIds.map(({ id, type }) => getAIConfig(id, type, authUser.id))
+    )
+  }
   const allAIs = aiConfigs.filter(Boolean) as NonNullable<Awaited<ReturnType<typeof getAIConfig>>>[]
 
   // 本地模型由前端直接调用，这里只处理非本地的
@@ -294,7 +314,7 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
         const ai = activeAIs[i]
         const result = replies[i]
         const replyContent = result.status === 'fulfilled' ? result.value : `❌ 调用失败`
-        const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, replyContent, '竞标方案', { model: ai.model })
+        const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, replyContent, '竞标方案', { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model })
         resultMessages.push(msg)
       }
 
@@ -371,7 +391,7 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
         const ai = actualExperts[i]
         const result = expertReplies[i]
         const replyContent = result.status === 'fulfilled' ? result.value : '分析失败'
-        const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, replyContent, `专家·${dimensions[i] || i + 1}`, { model: ai.model })
+        const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, replyContent, `专家·${dimensions[i] || i + 1}`, { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model })
         resultMessages.push(msg)
         expertsReport += `\n\n【${dimensions[i] || `专家${i + 1}`} 分析】(${ai.name}):\n${replyContent}`
       }
@@ -437,7 +457,7 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
           systemPrompt: ai.systemPrompt,
           maxTokens: (cfg.max_tokens as number) || 800,
         })
-        const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, reply, '专家发言', { model: ai.model })
+        const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, reply, '专家发言', { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model })
         resultMessages.push(msg)
       }
     }
