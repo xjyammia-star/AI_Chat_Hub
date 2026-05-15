@@ -140,7 +140,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
               system_prompt: localAI.system_prompt,
               messages: sessionMessages,
             })
-            const localMsg: ChatMessage = {
+            // 保存到数据库
+            let savedMsg: ChatMessage | null = null
+            try {
+              const saveRes = await apiRequest('/chat/save_local', {
+                method: 'POST',
+                body: JSON.stringify({
+                  session_id: currentSession!.id,
+                  sender_id: localAI.id,
+                  sender_name: localAI.name,
+                  sender_avatar: localAI.avatar,
+                  content: reply,
+                  model: localAI.model,
+                }),
+              })
+              if (saveRes.ok) {
+                const saveData = await saveRes.json()
+                savedMsg = saveData.message
+              }
+            } catch { /* 保存失败不影响显示 */ }
+
+            const localMsg: ChatMessage = savedMsg || {
               id: `local-${localAI.id}-${Date.now()}`,
               session_id: currentSession!.id,
               sender_type: 'ai', sender_id: localAI.id,
