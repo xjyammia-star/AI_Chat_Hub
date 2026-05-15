@@ -34,9 +34,13 @@ export default function ChatArea() {
         const data = await res.json()
         setAiMembers(data.members)
         const available = data.members.filter((m: AIMember) => m.is_enabled)
-        // 自动选中所有还没被选中的可用成员
+        // 直接设置所有可用成员为选中状态（避免闭包问题）
+        const { useChatStore: store } = await import('@/lib/chat')
+        const currentSelected = store.getState().selectedAIIds
         available.forEach((m: AIMember) => {
-          if (!selectedAIIds.includes(m.id)) toggleAIMember(m.id)
+          if (!currentSelected.includes(m.id)) {
+            store.getState().toggleAIMember(m.id)
+          }
         })
       }
     })
