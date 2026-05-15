@@ -4,7 +4,7 @@ import type { VercelRequest, VercelResponse } from '@vercel/node'
 import { requireAuth } from '../_lib/middleware.js'
 import sql from '../_lib/db.js'
 
-export default requireAuth(async (req, res, authUser) => {
+export default requireAuth(async (req, res, authUser): Promise<void> => {
   const [user] = await sql`
     SELECT id, email, display_name, role, is_active, created_at
     FROM users WHERE id = ${authUser.id}
