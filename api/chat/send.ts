@@ -2,9 +2,9 @@
 // 核心发送 API — 处理 5 种聊天模式
 
 import type { VercelRequest, VercelResponse } from '@vercel/node'
-import { requireAuth } from '../_lib/middleware'
-import sql from '../_lib/db'
-import { decryptKey } from '../_lib/crypto'
+import { requireAuth } from '../_lib/middleware.js'
+import sql from '../_lib/db.js'
+import { decryptKey } from '../_lib/crypto.js'
 
 // ---- AI 调用统一接口 ----
 interface AICallParams {
