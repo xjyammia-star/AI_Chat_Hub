@@ -80,21 +80,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const { currentSession, activeMode, selectedAIIds } = get()
     if (!currentSession || !content.trim()) return
 
-    // 乐观更新：先显示用户消息
-    const tempUserMsg: ChatMessage = {
-      id: `temp-${Date.now()}`,
-      session_id: currentSession.id,
-      sender_type: 'user',
-      sender_name: '我',
-      content,
-      created_at: new Date().toISOString(),
-    }
-    set((state) => ({
-      messages: [...state.messages, tempUserMsg],
-      isSending: true,
-    }))
-
-    // 添加"正在思考"占位消息
+    // 添加"正在思考"占位消息（不提前显示用户消息，等服务端返回）
     const thinkingMsg: ChatMessage = {
       id: `thinking-${Date.now()}`,
       session_id: currentSession.id,
@@ -104,7 +90,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       metadata: { thinking: true },
       created_at: new Date().toISOString(),
     }
-    set((state) => ({ messages: [...state.messages, thinkingMsg] }))
+    set((state) => ({ messages: [...state.messages, thinkingMsg], isSending: true }))
 
     try {
       const res = await apiRequest('/chat/send', {
