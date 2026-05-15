@@ -274,7 +274,9 @@ function MessageRow({ message }: { message: ChatMessage }) {
             )}
             {message.metadata?.model && (
               <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-                {message.metadata.model}
+                {String(message.metadata.model).startsWith('ep-')
+                  ? message.sender_name
+                  : String(message.metadata.model)}
               </span>
             )}
           </div>
