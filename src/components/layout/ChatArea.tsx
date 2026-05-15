@@ -203,7 +203,7 @@ export default function ChatArea() {
             👥 所有人
           </div>
           {/* 各AI成员 */}
-          {aiMembers.filter((m) => selectedAIIds.some(id => id === m.id || id === `${m.id}:user`)).map((m) => {
+          {aiMembers.filter((m) => selectedAIIds.includes(m.id) || selectedAIIds.includes(`${m.id}:user`)).map((m) => {
             const isSelected = mentionedIds.includes(m.id)
             return (
               <div key={m.id}
@@ -340,7 +340,7 @@ function MemberDropdown({ members, selected, onToggle, onClose, onManage }: {
               <div style={{ fontSize: 13, fontWeight: 500 }}>{m.custom_name || m.name}</div>
               <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{String(m.model).startsWith('ep-') ? m.name : m.model}</div>
             </div>
-            <div className={`status-dot ${m.is_available ? 'online' : 'offline'}`} />
+            <div className={`status-dot ${(selected.includes(m.id) || selected.includes(`${m.id}:user`)) ? 'online' : 'offline'}`} />
           </div>
         ))}
         <div className="divider" style={{ margin: '6px 0' }} />
