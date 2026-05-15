@@ -152,7 +152,7 @@ async function saveMessage(sessionId: string, senderType: string, senderId: stri
 }
 
 // ---- 主处理函数 ----
-export default requireAuth(async (req, res, authUser) => {
+export default requireAuth(async (req, res, authUser): Promise<void> => {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
   const { session_id, content, mode = 'normal', selected_ai_ids = [] } = req.body
