@@ -3,7 +3,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node'
 import bcrypt from 'bcryptjs'
 import { SignJWT } from 'jose'
-import sql from '../_lib/db'
+import sql from '../_lib/db.js'
 
 const JWT_SECRET = new TextEncoder().encode(process.env.JWT_SECRET || 'fallback-secret')
 
