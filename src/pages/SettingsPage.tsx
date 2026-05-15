@@ -376,7 +376,7 @@ function ChatModesSettings() {
                   <button className="btn btn-ghost" style={{ padding: '4px 8px' }}
                     onClick={() => {
                       setExpandedId(isExpanded ? null : mode.id)
-                      setEditingMode(isExpanded ? null : { ...mode, config })
+                      setEditingMode(isExpanded ? null : mode)
                     }}>
                     {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                   </button>
@@ -411,8 +411,8 @@ function ChatModesSettings() {
                     <ModeRoleAssigner
                       modeKey={mode.mode_key}
                       members={members}
-                      config={typeof editingMode.config === 'string' ? (() => { try { return JSON.parse(editingMode.config as string) } catch { return {} } })() : editingMode.config as Record<string, unknown>}
-                      onChange={(newConfig) => setEditingMode({ ...editingMode, config: JSON.stringify(newConfig, null, 2) })}
+                      config={editingMode.config}
+                      onChange={(newConfig) => setEditingMode({ ...editingMode, config: newConfig })}
                     />
                   </div>
 
