@@ -246,7 +246,7 @@ function ChatModesSettings() {
 
   const load = async () => {
     const [mRes, membersRes] = await Promise.all([
-      apiRequest('/settings/modes'),
+      apiRequest('/settings?type=modes'),
       apiRequest('/members'),
     ])
     if (mRes.ok) { const d = await mRes.json(); setModes(d.modes) }
@@ -256,7 +256,7 @@ function ChatModesSettings() {
   useEffect(() => { load() }, [])
 
   const handleSaveMode = async (mode: ChatModeRecord) => {
-    const res = await apiRequest('/settings/modes', {
+    const res = await apiRequest('/settings?type=modes', {
       method: 'PUT',
       body: JSON.stringify({ id: mode.id, mode_name: mode.mode_name, description: mode.description, config: mode.config, is_enabled: mode.is_enabled }),
     })
@@ -268,7 +268,7 @@ function ChatModesSettings() {
     if (!newMode.mode_key || !newMode.mode_name) return toast.error('模式标识和名称不能为空')
     let config
     try { config = JSON.parse(newMode.config) } catch { return toast.error('JSON 格式错误') }
-    const res = await apiRequest('/settings/modes', {
+    const res = await apiRequest('/settings?type=modes', {
       method: 'POST',
       body: JSON.stringify({ ...newMode, config }),
     })
@@ -286,12 +286,12 @@ function ChatModesSettings() {
   const handleDeleteMode = async (id: string, modeKey: string) => {
     if (MODE_KEYS.includes(modeKey as ChatMode)) return toast.error('内置模式不可删除')
     if (!confirm('确认删除这个自定义模式？')) return
-    const res = await apiRequest('/settings/modes', { method: 'DELETE', body: JSON.stringify({ id }) })
+    const res = await apiRequest('/settings?type=modes', { method: 'DELETE', body: JSON.stringify({ id }) })
     if (res.ok) { toast.success('已删除'); load() }
   }
 
   const handleToggleMode = async (id: string, enabled: boolean) => {
-    await apiRequest('/settings/modes', { method: 'PUT', body: JSON.stringify({ id, is_enabled: !enabled }) })
+    await apiRequest('/settings?type=modes', { method: 'PUT', body: JSON.stringify({ id, is_enabled: !enabled }) })
     load()
   }
 
@@ -543,7 +543,7 @@ function ProfileSettings() {
 
   const handleSaveName = async () => {
     setSaving(true)
-    const res = await apiRequest('/settings/profile', {
+    const res = await apiRequest('/settings?type=profile', {
       method: 'PUT',
       body: JSON.stringify({ display_name: displayName }),
     })
@@ -556,7 +556,7 @@ function ProfileSettings() {
     if (!currentPw || !newPw) return toast.error('请填写当前密码和新密码')
     if (newPw.length < 8) return toast.error('新密码至少8位')
     setSaving(true)
-    const res = await apiRequest('/settings/profile', {
+    const res = await apiRequest('/settings?type=profile', {
       method: 'PUT',
       body: JSON.stringify({ current_password: currentPw, new_password: newPw }),
     })
