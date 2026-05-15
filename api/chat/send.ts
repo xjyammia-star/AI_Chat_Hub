@@ -170,6 +170,17 @@ export default requireAuth(async (req, res, authUser) => {
     return res.json({ messages: [userMsg, errorMsg] })
   }
 
+  // 处理 @ 提及：如果消息中包含 @成员名，只让被@的成员回复
+  const mentionMatch = content.match(/@([^\s@]+)/)
+  let activeAIs = validAIs
+  if (mentionMatch && mentionMatch[1] !== '所有人') {
+    const mentionedName = mentionMatch[1]
+    const mentioned = validAIs.filter(ai =>
+      ai.name.includes(mentionedName) || mentionedName.includes(ai.name)
+    )
+    if (mentioned.length > 0) activeAIs = mentioned
+  }
+
   // 获取模式配置
   const [modeConfig] = await sql`SELECT * FROM chat_modes WHERE mode_key = ${mode} AND is_enabled = true`
 
@@ -181,7 +192,7 @@ export default requireAuth(async (req, res, authUser) => {
     if (mode === 'normal') {
       // 普通模式：所有选中的 AI 并行回复
       const replies = await Promise.allSettled(
-        validAIs.map((ai) =>
+        activeAIs.map((ai) =>
           callAI({
             provider: ai.provider,
             model: ai.model,
@@ -195,8 +206,8 @@ export default requireAuth(async (req, res, authUser) => {
         )
       )
 
-      for (let i = 0; i < validAIs.length; i++) {
-        const ai = validAIs[i]
+      for (let i = 0; i < activeAIs.length; i++) {
+        const ai = activeAIs[i]
         const result = replies[i]
         const content = result.status === 'fulfilled' ? result.value : `❌ 调用失败: ${(result.reason as Error).message}`
         const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, content, undefined, { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model })
@@ -225,8 +236,8 @@ export default requireAuth(async (req, res, authUser) => {
         )
       )
 
-      for (let i = 0; i < validAIs.length; i++) {
-        const ai = validAIs[i]
+      for (let i = 0; i < activeAIs.length; i++) {
+        const ai = activeAIs[i]
         const result = replies[i]
         const replyContent = result.status === 'fulfilled' ? result.value : `❌ 调用失败`
         const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, replyContent, '竞标方案', { model: ai.model })
