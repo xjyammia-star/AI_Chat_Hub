@@ -4,7 +4,7 @@ import type { VercelRequest, VercelResponse } from '@vercel/node'
 import { requireAdmin } from '../_lib/middleware.js'
 import sql from '../_lib/db.js'
 
-export default requireAdmin(async (req, res) => {
+export default requireAdmin(async (req, res): Promise<void> => {
   if (req.method === 'GET') {
     const users = await sql`SELECT id, email, display_name, role, is_active, created_at FROM users ORDER BY created_at DESC`
     return res.json({ users })
