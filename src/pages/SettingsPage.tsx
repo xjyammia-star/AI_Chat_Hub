@@ -465,9 +465,11 @@ function ModeRoleAssigner({ modeKey, members, config, onChange }: {
   const roleDefinitions: Record<string, { key: string; label: string; desc: string }[]> = {
     judge: [
       { key: 'judge_ai_id', label: '主审官', desc: '综合各方意见做出最终裁决' },
-      { key: 'expert_1_ai_id', label: '专家1', desc: '从第一个维度分析' },
-      { key: 'expert_2_ai_id', label: '专家2', desc: '从第二个维度分析' },
-      { key: 'expert_3_ai_id', label: '专家3', desc: '从第三个维度分析' },
+      ...Array.from({ length: Math.max(members.filter(m => m.is_enabled).length - 1, 3) }, (_, i) => ({
+        key: `expert_${i + 1}_ai_id`,
+        label: `专家${i + 1}`,
+        desc: `从第${i + 1}个维度分析`,
+      })),
     ],
     shadow: [
       { key: 'actor_ai_id', label: '执行者', desc: '直接完成任务' },
