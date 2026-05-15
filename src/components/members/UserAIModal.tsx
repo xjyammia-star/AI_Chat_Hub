@@ -5,6 +5,7 @@ import { useState, useEffect } from 'react'
 import { X, Plus, Trash2, Wifi, WifiOff, RefreshCw } from 'lucide-react'
 import { apiRequest } from '@/lib/auth'
 import { AI_PROVIDERS, checkOllamaAvailability } from '@/lib/providers'
+import AvatarPicker from '@/components/members/AvatarPicker'
 import toast from 'react-hot-toast'
 
 interface UserAIMember {
@@ -210,8 +211,8 @@ export default function UserAIModal({ onClose, onSaved }: Props) {
                 </div>
                 {/* 头像 */}
                 <div>
-                  <label className="form-label">头像 (emoji)</label>
-                  <input className="form-input" placeholder="🦙" value={form.avatar} onChange={(e) => setForm({ ...form, avatar: e.target.value })} />
+                  <label className="form-label">头像</label>
+                  <AvatarPicker value={form.avatar} onChange={(emoji) => setForm({ ...form, avatar: emoji })} />
                 </div>
               </div>
 
