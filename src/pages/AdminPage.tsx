@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { ArrowLeft, Plus, Trash2, Edit2, Eye, EyeOff, Users, Bot, BookOpen, Settings } from 'lucide-react'
 import { apiRequest } from '@/lib/auth'
 import { AI_PROVIDERS, DEFAULT_AVATARS } from '@/lib/providers'
+import AvatarPicker from '@/components/members/AvatarPicker'
 import type { AIRole } from '@/types'
 import toast from 'react-hot-toast'
 
@@ -135,8 +136,8 @@ function AIManagerPanel() {
               <input className="form-input" placeholder="如：Gemini Pro" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
             </div>
             <div>
-              <label className="form-label">头像 (emoji)</label>
-              <input className="form-input" placeholder="✨" value={form.avatar} onChange={(e) => setForm({ ...form, avatar: e.target.value })} />
+              <label className="form-label">头像</label>
+              <AvatarPicker value={form.avatar} onChange={(emoji) => setForm({ ...form, avatar: emoji })} />
             </div>
             <div>
               <label className="form-label">AI 提供商 *</label>
