@@ -33,17 +33,18 @@ export default function ChatArea() {
       if (res.ok) {
         const data = await res.json()
         setAiMembers(data.members)
-        // 重置并重新设置所有可用成员
-        const enabledIds = data.members
-          .filter((m: AIMember) => m.is_enabled)
-          .map((m: AIMember) => m.type === 'user' ? `${m.id}:user` : m.id)
-        // 直接设置 selectedAIIds，避免重复
+        // 去重后设置
+        const enabledIds = Array.from(new Set(
+          data.members
+            .filter((m: AIMember) => m.is_enabled)
+            .map((m: AIMember) => m.type === 'user' ? `${m.id}:user` : m.id)
+        ))
         useChatStore.setState({ selectedAIIds: enabledIds })
       }
     })
   }
 
-  useEffect(() => { loadMembers() }, [])
+  useEffect(() => { loadMembers() }, [])  // 只在挂载时执行一次
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
   const handleSend = async () => {
