@@ -1,8 +1,8 @@
 // api/chat/sessions.ts
 
 import type { VercelRequest, VercelResponse } from '@vercel/node'
-import { requireAuth } from '../_lib/middleware'
-import sql from '../_lib/db'
+import { requireAuth } from '../_lib/middleware.js'
+import sql from '../_lib/db.js'
 
 export default requireAuth(async (req, res, authUser) => {
   if (req.method === 'GET') {
