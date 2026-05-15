@@ -115,6 +115,7 @@ export interface ChatMessage {
   role_in_mode?: string       // judge / expert / shadow / actor 等
   metadata?: {
     model?: string
+    display_model?: string
     tokens?: number
     error?: string
     thinking?: boolean        // 是否正在思考中（流式）
