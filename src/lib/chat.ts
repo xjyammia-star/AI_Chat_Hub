@@ -48,7 +48,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (current.includes(id)) {
       set({ selectedAIIds: current.filter((x) => x !== id) })
     } else {
-      set({ selectedAIIds: [...current, id] })
+      // 去重：避免重复添加
+      if (!current.includes(id)) {
+        set({ selectedAIIds: [...current, id] })
+      }
     }
   },
 
