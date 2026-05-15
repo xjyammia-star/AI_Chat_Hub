@@ -22,7 +22,7 @@ export default function ChatArea() {
   const [showModeMenu, setShowModeMenu] = useState(false)
   const [showMemberMenu, setShowMemberMenu] = useState(false)
   const [showUserAIModal, setShowUserAIModal] = useState(false)
-  const [mentionedId, setMentionedId] = useState<string | null>(null)
+  const [mentionedIds, setMentionedIds] = useState<string[]>([])
   const [showMentionMenu, setShowMentionMenu] = useState(false)
   const [mentionQuery, setMentionQuery] = useState('')
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -33,16 +33,12 @@ export default function ChatArea() {
       if (res.ok) {
         const data = await res.json()
         setAiMembers(data.members)
-        // 自动选中所有可用成员，私人AI带 :user 后缀
-        data.members
+        // 重置并重新设置所有可用成员
+        const enabledIds = data.members
           .filter((m: AIMember) => m.is_enabled)
-          .forEach((m: AIMember) => {
-            const id = m.type === 'user' ? `${m.id}:user` : m.id
-            const current = useChatStore.getState().selectedAIIds
-            if (!current.includes(id) && !current.includes(m.id)) {
-              useChatStore.getState().toggleAIMember(id)
-            }
-          })
+          .map((m: AIMember) => m.type === 'user' ? `${m.id}:user` : m.id)
+        // 直接设置 selectedAIIds，避免重复
+        useChatStore.setState({ selectedAIIds: enabledIds })
       }
     })
   }
@@ -59,10 +55,26 @@ export default function ChatArea() {
     }
     const text = input
     setInput('')
-    setMentionedId(null)
+    const currentMentionedIds = [...mentionedIds]
+    setMentionedIds([])
+    // Store mentionedIds in the store before sending
+    if (currentMentionedIds.length > 0) {
+      useChatStore.setState({ selectedAIIds: currentMentionedIds.map(id => {
+        const m = aiMembers.find(m => m.id === id)
+        return m?.type === 'user' ? `${id}:user` : id
+      })})
+    }
     try {
       await sendMessage(text)
+      // Restore all members after sending
+      if (currentMentionedIds.length > 0) {
+        const enabledIds = aiMembers.filter(m => m.is_enabled).map(m => m.type === 'user' ? `${m.id}:user` : m.id)
+        useChatStore.setState({ selectedAIIds: enabledIds })
+      }
     } catch {
+      // Restore members on error too
+      const enabledIds = aiMembers.filter(m => m.is_enabled).map(m => m.type === 'user' ? `${m.id}:user` : m.id)
+      useChatStore.setState({ selectedAIIds: enabledIds })
       toast.error('发送失败，请重试')
     }
   }
@@ -96,11 +108,13 @@ export default function ChatArea() {
     const lastAt = input.lastIndexOf('@')
     if (member === null) {
       setInput(input.slice(0, lastAt))
-      setMentionedId(null)
+      setMentionedIds([])
     } else {
       const name = member.custom_name || member.name
       setInput(input.slice(0, lastAt) + `@${name} `)
-      setMentionedId(member.id)
+      if (!mentionedIds.includes(member.id)) {
+        setMentionedIds([...mentionedIds, member.id])
+      }
     }
     setShowMentionMenu(false)
     inputRef.current?.focus()
@@ -177,21 +191,33 @@ export default function ChatArea() {
       </div>
 
       <div className="input-area">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, flexWrap: 'wrap', minHeight: 24 }}>
-          {mentionedId && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '2px 8px', background: 'rgba(99,102,241,0.15)', borderRadius: 20, fontSize: 12, color: 'var(--accent-hover)', border: '1px solid rgba(99,102,241,0.3)' }}>
-              <AtSign size={11} />
-              {aiMembers.find((m) => m.id === mentionedId)?.custom_name || aiMembers.find((m) => m.id === mentionedId)?.name}
-              <button onClick={() => setMentionedId(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', padding: 0, marginLeft: 2 }}>×</button>
-            </div>
-          )}
-          {aiMembers.filter((m) => selectedAIIds.includes(m.id)).map((m) => (
-            <div key={m.id} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '2px 8px', background: mentionedId === m.id ? 'rgba(99,102,241,0.1)' : 'var(--bg-input)', borderRadius: 20, fontSize: 12, color: 'var(--text-secondary)', border: `1px solid ${mentionedId === m.id ? 'rgba(99,102,241,0.3)' : 'var(--border)'}` }}>
-              <span>{m.custom_avatar || m.avatar}</span>
-              {m.custom_name || m.name}
-              {!m.is_available && <span style={{ color: 'var(--red)', fontSize: 10 }}>⚠</span>}
-            </div>
-          ))}
+        {/* 可点击的成员@选择器 */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, flexWrap: 'wrap', minHeight: 28 }}>
+          <span style={{ fontSize: 11, color: 'var(--text-muted)', flexShrink: 0 }}>@:</span>
+          {/* 全部 */}
+          <div
+            onClick={() => setMentionedIds([])}
+            style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '3px 10px', borderRadius: 20, fontSize: 12, cursor: 'pointer', background: mentionedIds.length === 0 ? 'var(--accent-glow)' : 'var(--bg-input)', color: mentionedIds.length === 0 ? 'var(--accent-hover)' : 'var(--text-muted)', border: `1px solid ${mentionedIds.length === 0 ? 'rgba(99,102,241,0.4)' : 'var(--border)'}`, transition: 'all 0.15s' }}
+          >
+            👥 所有人
+          </div>
+          {/* 各AI成员 */}
+          {aiMembers.filter((m) => selectedAIIds.some(id => id === m.id || id === `${m.id}:user`)).map((m) => {
+            const isSelected = mentionedIds.includes(m.id)
+            return (
+              <div key={m.id}
+                onClick={() => {
+                  if (isSelected) setMentionedIds(mentionedIds.filter(id => id !== m.id))
+                  else setMentionedIds([...mentionedIds, m.id])
+                }}
+                style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '3px 10px', borderRadius: 20, fontSize: 12, cursor: 'pointer', background: isSelected ? 'rgba(99,102,241,0.15)' : 'var(--bg-input)', color: isSelected ? 'var(--accent-hover)' : 'var(--text-secondary)', border: `1px solid ${isSelected ? 'rgba(99,102,241,0.4)' : 'var(--border)'}`, transition: 'all 0.15s' }}
+              >
+                <span>{m.custom_avatar || m.avatar}</span>
+                {m.custom_name || m.name}
+                {isSelected && <span style={{ fontSize: 10, marginLeft: 2 }}>✓</span>}
+              </div>
+            )
+          })}
         </div>
 
         {showMentionMenu && (
@@ -280,7 +306,9 @@ function MessageRow({ message }: { message: ChatMessage }) {
             )}
             {message.metadata?.model && (
               <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-                {String(message.metadata.model).startsWith('ep-') ? message.sender_name : String(message.metadata.model)}
+                {String(message.metadata.model).startsWith('ep-')
+                  ? String(message.metadata.display_model || message.metadata.model)
+                  : String(message.metadata.model)}
               </span>
             )}
           </div>
