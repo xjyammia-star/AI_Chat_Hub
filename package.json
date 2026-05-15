@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "tsc -p tsconfig.app.json && vite build",
     "preview": "vite preview",
     "lint": "eslint . --ext ts,tsx"
   },
@@ -40,6 +40,7 @@
     "vite-plugin-pwa": "^0.19.2",
     "eslint": "^8.57.0",
     "@typescript-eslint/eslint-plugin": "^7.1.0",
-    "@typescript-eslint/parser": "^7.1.0"
+    "@typescript-eslint/parser": "^7.1.0",
+    "@vercel/node": "^3.0.0"
   }
 }
