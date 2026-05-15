@@ -201,8 +201,9 @@ export default requireAuth(async (req, res, authUser) => {
     const mentionedLocal = localAIs.filter(ai =>
       ai.name.includes(mentionedName) || mentionedName.includes(ai.name)
     )
+    // 只有明确匹配到本地AI时才限制，否则保持全部
     if (mentionedLocal.length > 0) activeLocalAIs = mentionedLocal
-    else activeLocalAIs = []  // @ 的是服务端AI，本地AI不参与
+    else activeLocalAIs = []
   }
 
   // 过滤服务端AI（@ 过滤）
@@ -212,10 +213,10 @@ export default requireAuth(async (req, res, authUser) => {
       ai.name.includes(mentionedName) || mentionedName.includes(ai.name)
     )
     if (mentionedServer.length > 0) activeAIs = mentionedServer
-    else activeAIs = []  // @ 的是本地AI，服务端AI不参与
+    else activeAIs = []
   }
 
-  // 如果只有本地模型需要回复
+  // 如果只有本地模型需要回复（包括 @ 本地AI 的情况）
   if (activeLocalAIs.length > 0 && activeAIs.length === 0) {
     return res.json({
       messages: [userMsg],
@@ -228,6 +229,7 @@ export default requireAuth(async (req, res, authUser) => {
     })
   }
 
+  // 没有任何AI可以回复
   if (activeAIs.length === 0 && activeLocalAIs.length === 0) {
     const errorMsg = await saveMessage(session_id, 'system', null, 'system', null, '⚠️ 没有可用的 AI 成员，请在右上角选择至少一个 AI')
     return res.json({ messages: [userMsg, errorMsg] })
