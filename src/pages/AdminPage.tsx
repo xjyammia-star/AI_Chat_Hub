@@ -75,6 +75,8 @@ export default function AdminPage() {
 function AIManagerPanel() {
   const [members, setMembers] = useState<Record<string, unknown>[]>([])
   const [showAdd, setShowAdd] = useState(false)
+  const [editingMember, setEditingMember] = useState<Record<string, unknown> | null>(null)
+  const [editForm, setEditForm] = useState({ name: '', avatar: '🤖', api_key: '', is_public: true, is_enabled: true })
   const [form, setForm] = useState({ name: '', avatar: '🤖', provider: 'gemini', model: '', api_key: '', base_url: '', is_public: true })
   const [showKey, setShowKey] = useState<Record<string, boolean>>({})
 
@@ -114,6 +116,20 @@ function AIManagerPanel() {
   const handleTogglePublic = async (id: string, isPublic: boolean) => {
     const res = await apiRequest('/admin/members', { method: 'PUT', body: JSON.stringify({ id, is_public: !isPublic }) })
     if (res.ok) { load() }
+  }
+
+  const openEdit = (m: Record<string, unknown>) => {
+    setEditingMember(m)
+    setEditForm({ name: m.name as string, avatar: m.avatar as string || '🤖', api_key: '', is_public: m.is_public as boolean, is_enabled: m.is_enabled as boolean })
+  }
+
+  const handleEditSave = async () => {
+    if (!editingMember) return
+    const payload: Record<string, unknown> = { id: editingMember.id, name: editForm.name, avatar: editForm.avatar, is_public: editForm.is_public, is_enabled: editForm.is_enabled }
+    if (editForm.api_key) payload.api_key = editForm.api_key
+    const res = await apiRequest('/admin/members', { method: 'PUT', body: JSON.stringify(payload) })
+    if (res.ok) { toast.success('保存成功'); setEditingMember(null); load() }
+    else { toast.error('保存失败') }
   }
 
   const providerInfo = AI_PROVIDERS[form.provider as keyof typeof AI_PROVIDERS]
@@ -188,6 +204,43 @@ function AIManagerPanel() {
         </div>
       )}
 
+      {/* 编辑弹窗 */}
+      {editingMember && (
+        <div className="modal-overlay" onClick={() => setEditingMember(null)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ width: 420 }}>
+            <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 16 }}>编辑 AI 成员</h3>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div>
+                <label className="form-label">头像</label>
+                <AvatarPicker value={editForm.avatar} onChange={(emoji) => setEditForm({ ...editForm, avatar: emoji })} />
+              </div>
+              <div>
+                <label className="form-label">显示名称</label>
+                <input className="form-input" value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} />
+              </div>
+              <div>
+                <label className="form-label">更新 API Key（留空则保持不变）</label>
+                <input className="form-input" type="password" placeholder="输入新的 API Key..." value={editForm.api_key} onChange={(e) => setEditForm({ ...editForm, api_key: e.target.value })} />
+              </div>
+              <div style={{ display: 'flex', gap: 16 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={editForm.is_public} onChange={(e) => setEditForm({ ...editForm, is_public: e.target.checked })} style={{ accentColor: 'var(--accent)' }} />
+                  对所有用户开放
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={editForm.is_enabled} onChange={(e) => setEditForm({ ...editForm, is_enabled: e.target.checked })} style={{ accentColor: 'var(--accent)' }} />
+                  启用
+                </label>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+              <button className="btn btn-primary" onClick={handleEditSave} style={{ flex: 1, justifyContent: 'center' }}>保存</button>
+              <button className="btn btn-ghost" onClick={() => setEditingMember(null)}>取消</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {members.length === 0 && <p style={{ color: 'var(--text-muted)', fontSize: 13 }}>还没有系统 AI 成员</p>}
         {members.map((m) => (
@@ -203,6 +256,9 @@ function AIManagerPanel() {
               </span>
               <button className="btn btn-ghost" style={{ padding: '4px 8px', fontSize: 12 }} onClick={() => handleTogglePublic(m.id as string, m.is_public as boolean)}>
                 {m.is_public ? <EyeOff size={13} /> : <Eye size={13} />}
+              </button>
+              <button className="btn btn-ghost" style={{ padding: '4px 8px' }} onClick={() => openEdit(m)} title="编辑">
+                <Edit2 size={13} />
               </button>
               <button className="btn btn-danger" style={{ padding: '4px 8px' }} onClick={() => handleDelete(m.id as string)}>
                 <Trash2 size={13} />
