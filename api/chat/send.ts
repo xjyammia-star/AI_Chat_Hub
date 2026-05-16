@@ -27,14 +27,21 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
   custom:    '',
 }
 
-// 判断是否是混元模型（通过 baseUrl 或 model 名称判断）
 function isHunyuanModel(baseUrl?: string, model?: string): boolean {
-  if (baseUrl && (baseUrl.includes('hunyuan') || baseUrl.includes('tokenhub') || baseUrl.includes('tencentmaa') || baseUrl.includes('tencent'))) return true
-  if (model && (model.includes('hunyuan') || model.includes('hy3') || model.startsWith('hy'))) return true
+  if (baseUrl && (
+    baseUrl.includes('hunyuan') ||
+    baseUrl.includes('tokenhub') ||
+    baseUrl.includes('tencentmaa') ||
+    baseUrl.includes('tencent')
+  )) return true
+  if (model && (
+    model.includes('hunyuan') ||
+    model.includes('hy3') ||
+    model.startsWith('hy')
+  )) return true
   return false
 }
 
-// 修复连续同角色消息（混元要求严格交替）
 function normalizeMessages(messages: Array<{ role: string; content: string }>): Array<{ role: string; content: string }> {
   if (messages.length === 0) return messages
   const result: Array<{ role: string; content: string }> = []
@@ -46,36 +53,8 @@ function normalizeMessages(messages: Array<{ role: string; content: string }>): 
       result.push({ ...msg })
     }
   }
-  // 确保以 user 开头
   if (result.length > 0 && result[0].role !== 'user') {
     result.shift()
-  }
-  return result
-}
-
-// 为混元构建消息列表：把 system prompt 合并进第一条 user 消息，不用 system 角色
-function buildHunyuanMessages(
-  messages: Array<{ role: string; content: string }>,
-  systemPrompt?: string
-): Array<{ role: string; content: string }> {
-  const normalized = normalizeMessages(messages)
-
-  if (!systemPrompt || !systemPrompt.trim()) {
-    return normalized.length > 0 ? normalized : [{ role: 'user', content: '你好' }]
-  }
-
-  if (normalized.length === 0) {
-    // 没有历史消息，直接把 system prompt 作为 user 消息前缀
-    return [{ role: 'user', content: `${systemPrompt}\n\n请根据以上设定回复用户。` }]
-  }
-
-  // 把 system prompt 追加到第一条 user 消息前面
-  const result = [...normalized]
-  if (result[0].role === 'user') {
-    result[0] = {
-      role: 'user',
-      content: `${systemPrompt}\n\n---\n\n${result[0].content}`
-    }
   }
   return result
 }
@@ -88,7 +67,7 @@ async function callAI(params: AICallParams): Promise<string> {
 
   if (!baseUrl) throw new Error(`未知提供商 ${provider}，请填写 API Base URL`)
 
-  // Gemini 格式
+  // Gemini
   if (provider === 'gemini') {
     const normalizedMessages = normalizeMessages(messages)
     const allMessages = systemPrompt
@@ -112,7 +91,7 @@ async function callAI(params: AICallParams): Promise<string> {
     return data.candidates?.[0]?.content?.parts?.[0]?.text || ''
   }
 
-  // GLM JWT Token
+  // GLM JWT
   let authToken = apiKey || ''
   if (provider === 'glm' && apiKey && apiKey.includes('.')) {
     const [id, secret] = apiKey.split('.')
@@ -140,26 +119,36 @@ async function callAI(params: AICallParams): Promise<string> {
 
   // OpenAI 兼容格式
   const url = `${baseUrl}/chat/completions`
+  const hunyuan = isHunyuanModel(baseUrl, model)
 
-  let finalMessages: Array<{ role: string; content: string }>
+  const normalizedMessages = normalizeMessages(messages)
+  const finalMessages = systemPrompt
+    ? [{ role: 'system', content: systemPrompt }, ...normalizedMessages]
+    : normalizedMessages
 
-  if (isHunyuanModel(baseUrl, model)) {
-    // 混元：不支持 system 角色，把 system prompt 合并进第一条 user 消息
-    finalMessages = buildHunyuanMessages(messages, systemPrompt)
-  } else {
-    // 其他模型：正常处理
-    const normalizedMessages = normalizeMessages(messages)
-    finalMessages = systemPrompt
-      ? [{ role: 'system', content: systemPrompt }, ...normalizedMessages]
-      : normalizedMessages
+  // 构建请求 body
+  const body: Record<string, unknown> = {
+    model,
+    messages: finalMessages,
+    max_tokens: maxTokens,
+    temperature,
   }
 
-  const body = { model, messages: finalMessages, max_tokens: maxTokens, temperature }
+  // 混元专属：禁用工具调用，避免误解析 system prompt 内容为 tool call
+  if (hunyuan) {
+    body.tool_choice = 'none'
+  }
+
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (authToken) headers['Authorization'] = `Bearer ${authToken}`
+
   const resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) })
   const data = await resp.json()
-  if (!resp.ok) throw new Error(data.error?.message || `API error ${resp.status}`)
+  if (!resp.ok) {
+    console.error('[AI Error] provider:', provider, 'model:', model, 'baseUrl:', baseUrl)
+    console.error('[AI Error] response:', JSON.stringify(data))
+    throw new Error(data.error?.message || `API error ${resp.status}`)
+  }
   return data.choices?.[0]?.message?.content || ''
 }
 
@@ -482,7 +471,8 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
       resultMessages.push(await saveMessage(session_id, 'system', null, 'system', null, `👤 执行者: ${actor.name}  |  👁 影子审查: ${shadow.name}`))
       const actorReply = await callAI({
         provider: actor.provider, model: actor.model, apiKey: actor.apiKey, baseUrl: actor.baseUrl,
-        messages: historyMessages, systemPrompt: buildSystemPrompt(actor.baseSystemPrompt, actorModePrompt),
+        messages: historyMessages,
+        systemPrompt: buildSystemPrompt(actor.baseSystemPrompt, actorModePrompt),
         maxTokens: (cfg.max_tokens_actor as number) || 1000,
       })
       resultMessages.push(await saveMessage(session_id, 'ai', actor.id, actor.name, actor.avatar, actorReply, '执行者', { model: actor.model }))
@@ -545,7 +535,8 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
       for (const ai of selectedExperts) {
         const reply = await callAI({
           provider: ai.provider, model: ai.model, apiKey: ai.apiKey, baseUrl: ai.baseUrl,
-          messages: historyMessages, systemPrompt: buildSystemPrompt(ai.baseSystemPrompt, expertReplyModePrompt),
+          messages: historyMessages,
+          systemPrompt: buildSystemPrompt(ai.baseSystemPrompt, expertReplyModePrompt),
           maxTokens: (cfg.max_tokens as number) || 800,
         })
         resultMessages.push(await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, reply, '专家发言', { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model }))
@@ -556,7 +547,8 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
       const replies = await Promise.allSettled(
         activeAIs.map((ai) => callAI({
           provider: ai.provider, model: ai.model, apiKey: ai.apiKey, baseUrl: ai.baseUrl,
-          messages: historyMessages, systemPrompt: buildSystemPrompt(ai.baseSystemPrompt, defaultModePrompt),
+          messages: historyMessages,
+          systemPrompt: buildSystemPrompt(ai.baseSystemPrompt, defaultModePrompt),
           maxTokens: (cfg.max_tokens as number) || 1500,
           temperature: (cfg.temperature as number) || 0.7,
         }))
