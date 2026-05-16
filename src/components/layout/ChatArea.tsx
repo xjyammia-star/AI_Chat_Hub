@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Send, Settings2, Users, Zap, Crown, Target, Eye, Radio, UserPlus, AtSign } from 'lucide-react'
+import { Send, Settings2, Users, Zap, Crown, Target, Eye, Radio, UserPlus, MessageCircle } from 'lucide-react'
 import TextareaAutosize from 'react-textarea-autosize'
 import { useChatStore } from '@/lib/chat'
 import type { ChatMessage, ChatMode, AIMember } from '@/types'
@@ -7,18 +7,31 @@ import { apiRequest } from '@/lib/auth'
 import toast from 'react-hot-toast'
 import UserAIModal from '@/components/members/UserAIModal'
 
-const MODE_INFO: Record<ChatMode, { icon: React.ElementType; label: string; desc: string; color: string }> = {
-  normal:   { icon: Zap,     label: '普通对话',  desc: '直接对话',     color: '#818cf8' },
-  judge:    { icon: Crown,   label: '主审官模式', desc: '专家分析+裁决', color: '#fbbf24' },
-  bidding:  { icon: Target,  label: '竞标模式',  desc: '并行提案比选',  color: '#34d399' },
-  shadow:   { icon: Eye,     label: '影子模式',  desc: '执行+后台审查', color: '#a78bfa' },
-  rollcall: { icon: Radio,   label: '点名模式',  desc: '自动调用专家',  color: '#f472b6' },
+// 内置模式的图标和颜色（仅用于显示，不影响功能）
+const BUILTIN_MODE_STYLE: Record<string, { icon: React.ElementType; color: string }> = {
+  normal:     { icon: Zap,           color: '#818cf8' },
+  judge:      { icon: Crown,         color: '#fbbf24' },
+  bidding:    { icon: Target,        color: '#34d399' },
+  shadow:     { icon: Eye,           color: '#a78bfa' },
+  rollcall:   { icon: Radio,         color: '#f472b6' },
+  discussion: { icon: MessageCircle, color: '#38bdf8' },
+}
+
+// 动态模式类型（来自数据库）
+interface DynamicMode {
+  id: string
+  mode_key: string
+  mode_name: string
+  description: string
+  is_enabled: boolean
+  config: Record<string, unknown>
 }
 
 export default function ChatArea() {
   const { currentSession, messages, isSending, activeMode, selectedAIIds, setActiveMode, toggleAIMember, sendMessage, createSession, setCurrentSession } = useChatStore()
   const [input, setInput] = useState('')
   const [aiMembers, setAiMembers] = useState<AIMember[]>([])
+  const [modes, setModes] = useState<DynamicMode[]>([])
   const [showModeMenu, setShowModeMenu] = useState(false)
   const [showMemberMenu, setShowMemberMenu] = useState(false)
   const [showUserAIModal, setShowUserAIModal] = useState(false)
@@ -33,7 +46,6 @@ export default function ChatArea() {
       if (res.ok) {
         const data = await res.json()
         setAiMembers(data.members)
-        // 去重后设置
         const enabledIds: string[] = Array.from(new Set<string>(
           data.members
             .filter((m: AIMember) => m.is_enabled)
@@ -44,7 +56,17 @@ export default function ChatArea() {
     })
   }
 
-  useEffect(() => { loadMembers() }, [])  // 只在挂载时执行一次
+  // 从数据库加载模式列表
+  const loadModes = () => {
+    apiRequest('/settings?type=modes').then(async (res) => {
+      if (res.ok) {
+        const data = await res.json()
+        setModes(data.modes.filter((m: DynamicMode) => m.is_enabled))
+      }
+    })
+  }
+
+  useEffect(() => { loadMembers(); loadModes() }, [])
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
   const handleSend = async () => {
@@ -58,7 +80,6 @@ export default function ChatArea() {
     setInput('')
     const currentMentionedIds = [...mentionedIds]
     setMentionedIds([])
-    // Store mentionedIds in the store before sending
     if (currentMentionedIds.length > 0) {
       useChatStore.setState({ selectedAIIds: currentMentionedIds.map(id => {
         const m = aiMembers.find(m => m.id === id)
@@ -67,13 +88,11 @@ export default function ChatArea() {
     }
     try {
       await sendMessage(text)
-      // Restore all members after sending
       if (currentMentionedIds.length > 0) {
         const enabledIds = aiMembers.filter(m => m.is_enabled).map(m => m.type === 'user' ? `${m.id}:user` : m.id)
         useChatStore.setState({ selectedAIIds: enabledIds })
       }
     } catch {
-      // Restore members on error too
       const enabledIds = aiMembers.filter(m => m.is_enabled).map(m => m.type === 'user' ? `${m.id}:user` : m.id)
       useChatStore.setState({ selectedAIIds: enabledIds })
       toast.error('发送失败，请重试')
@@ -125,6 +144,11 @@ export default function ChatArea() {
     m.is_enabled && (mentionQuery === '' || (m.custom_name || m.name).toLowerCase().includes(mentionQuery.toLowerCase()))
   )
 
+  // 当前激活模式的信息（从动态列表里找）
+  const activeModeInfo = modes.find(m => m.mode_key === activeMode)
+  const activeModeStyle = BUILTIN_MODE_STYLE[activeMode] || { icon: MessageCircle, color: '#818cf8' }
+  const ActiveModeIcon = activeModeStyle.icon
+
   if (!currentSession) {
     return (
       <div className="chat-area">
@@ -132,7 +156,9 @@ export default function ChatArea() {
           <div style={{ fontSize: 48 }}>💬</div>
           <div style={{ fontSize: 16, fontWeight: 500, color: 'var(--text-secondary)' }}>选择或新建一个对话</div>
           <p style={{ fontSize: 13, color: 'var(--text-muted)', textAlign: 'center', maxWidth: 280 }}>
-            支持普通对话、主审官、竞标、影子、点名 5 种模式
+            {modes.length > 0
+              ? `支持 ${modes.length} 种对话模式：${modes.slice(0, 3).map(m => m.mode_name).join('、')}等`
+              : '支持普通对话、主审官、竞标、影子、点名等多种模式'}
           </p>
           <button className="btn btn-primary" onClick={async () => {
             const session = await createSession('normal')
@@ -145,16 +171,14 @@ export default function ChatArea() {
     )
   }
 
-  const ModeIcon = MODE_INFO[activeMode].icon
-
   return (
     <div className="chat-area">
       <div className="chat-header">
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <h2 style={{ fontSize: 15, fontWeight: 600 }}>{currentSession.title}</h2>
           <span className={`mode-badge ${activeMode}`}>
-            <ModeIcon size={11} />
-            {MODE_INFO[activeMode].label}
+            <ActiveModeIcon size={11} />
+            {activeModeInfo?.mode_name || activeMode}
           </span>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
@@ -174,8 +198,12 @@ export default function ChatArea() {
               <Settings2 size={14} /> 模式
             </button>
             {showModeMenu && (
-              <ModeDropdown activeMode={activeMode} onSelect={(mode) => { setActiveMode(mode); setShowModeMenu(false) }}
-                onClose={() => setShowModeMenu(false)} />
+              <ModeDropdown
+                modes={modes}
+                activeMode={activeMode}
+                onSelect={(mode) => { setActiveMode(mode as ChatMode); setShowModeMenu(false) }}
+                onClose={() => setShowModeMenu(false)}
+              />
             )}
           </div>
         </div>
@@ -192,17 +220,15 @@ export default function ChatArea() {
       </div>
 
       <div className="input-area">
-        {/* 可点击的成员@选择器 */}
+        {/* @成员选择器 */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, flexWrap: 'wrap', minHeight: 28 }}>
           <span style={{ fontSize: 11, color: 'var(--text-muted)', flexShrink: 0 }}>@:</span>
-          {/* 全部 */}
           <div
             onClick={() => setMentionedIds([])}
             style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '3px 10px', borderRadius: 20, fontSize: 12, cursor: 'pointer', background: mentionedIds.length === 0 ? 'var(--accent-glow)' : 'var(--bg-input)', color: mentionedIds.length === 0 ? 'var(--accent-hover)' : 'var(--text-muted)', border: `1px solid ${mentionedIds.length === 0 ? 'rgba(99,102,241,0.4)' : 'var(--border)'}`, transition: 'all 0.15s' }}
           >
             👥 所有人
           </div>
-          {/* 各AI成员 */}
           {aiMembers.filter((m) => selectedAIIds.includes(m.id) || selectedAIIds.includes(`${m.id}:user`)).map((m) => {
             const isSelected = mentionedIds.includes(m.id)
             return (
@@ -353,25 +379,38 @@ function MemberDropdown({ members, selected, onToggle, onClose, onManage }: {
   )
 }
 
-function ModeDropdown({ activeMode, onSelect, onClose }: {
-  activeMode: ChatMode; onSelect: (mode: ChatMode) => void; onClose: () => void
+// ModeDropdown 现在接收动态模式列表，不再使用硬编码的 MODE_INFO
+function ModeDropdown({ modes, activeMode, onSelect, onClose }: {
+  modes: DynamicMode[]; activeMode: string; onSelect: (mode: string) => void; onClose: () => void
 }) {
   return (
     <>
       <div style={{ position: 'fixed', inset: 0, zIndex: 49 }} onClick={onClose} />
-      <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 6, width: 220, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 12, padding: 8, zIndex: 50, boxShadow: '0 8px 24px rgba(0,0,0,0.4)' }}>
+      <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 6, width: 230, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 12, padding: 8, zIndex: 50, boxShadow: '0 8px 24px rgba(0,0,0,0.4)', maxHeight: 400, overflowY: 'auto' }}>
         <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 8px 8px', fontWeight: 500 }}>聊天模式</div>
-        {(Object.entries(MODE_INFO) as [ChatMode, typeof MODE_INFO[ChatMode]][]).map(([key, info]) => {
-          const Icon = info.icon
+        {modes.length === 0 && (
+          <div style={{ padding: '8px', fontSize: 12, color: 'var(--text-muted)' }}>暂无可用模式</div>
+        )}
+        {modes.map((mode) => {
+          const style = BUILTIN_MODE_STYLE[mode.mode_key] || { icon: MessageCircle, color: '#818cf8' }
+          const Icon = style.icon
+          const isDiscussion = mode.mode_key === 'discussion' || mode.config?.discussion_mode === true
           return (
-            <div key={key} onClick={() => onSelect(key)}
-              style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 8px', borderRadius: 8, cursor: 'pointer', background: activeMode === key ? 'var(--accent-glow)' : 'transparent', border: activeMode === key ? '1px solid rgba(99,102,241,0.3)' : '1px solid transparent', marginBottom: 2 }}>
-              <div style={{ width: 28, height: 28, borderRadius: 8, background: `${info.color}20`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <Icon size={14} color={info.color} />
+            <div key={mode.mode_key} onClick={() => onSelect(mode.mode_key)}
+              style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 8px', borderRadius: 8, cursor: 'pointer', background: activeMode === mode.mode_key ? 'var(--accent-glow)' : 'transparent', border: activeMode === mode.mode_key ? '1px solid rgba(99,102,241,0.3)' : '1px solid transparent', marginBottom: 2 }}>
+              <div style={{ width: 28, height: 28, borderRadius: 8, background: `${style.color}20`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                <Icon size={14} color={style.color} />
               </div>
-              <div>
-                <div style={{ fontSize: 13, fontWeight: 500 }}>{info.label}</div>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{info.desc}</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 500, display: 'flex', alignItems: 'center', gap: 5 }}>
+                  {mode.mode_name}
+                  {isDiscussion && <span style={{ fontSize: 10, color: '#38bdf8', border: '1px solid rgba(56,189,248,0.3)', padding: '0 4px', borderRadius: 4 }}>讨论</span>}
+                </div>
+                {mode.description && (
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {mode.description}
+                  </div>
+                )}
               </div>
             </div>
           )
