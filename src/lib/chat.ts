@@ -75,19 +75,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
+  // 所有模式统一走 SSE
   sendMessage: async (content) => {
     const { currentSession, activeMode, selectedAIIds } = get()
     if (!currentSession || !content.trim()) return
 
     set({ isSending: true })
-
-    const isDiscussionMode = (activeMode as string) === 'discussion'
-
-    if (isDiscussionMode) {
-      await handleSSESend(content, currentSession, activeMode, selectedAIIds, set, get)
-    } else {
-      await handleNormalSend(content, currentSession, activeMode, selectedAIIds, set, get)
-    }
+    await handleSSESend(content, currentSession, activeMode, selectedAIIds, set, get)
   },
 
   createSession: async (mode = 'normal') => {
@@ -139,121 +133,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 }))
 
-// ---- 普通模式：JSON 响应（原逻辑不变）----
-async function handleNormalSend(
-  content: string,
-  currentSession: ChatSession,
-  activeMode: string,
-  selectedAIIds: string[],
-  set: any,
-  get: any
-) {
-  const thinkingMsg: ChatMessage = {
-    id: `thinking-${Date.now()}`,
-    session_id: currentSession.id,
-    sender_type: 'system',
-    sender_name: 'system',
-    content: '...',
-    metadata: { thinking: true },
-    created_at: new Date().toISOString(),
-  }
-  set((state: any) => ({ messages: [...state.messages, thinkingMsg] }))
-
-  try {
-    const res = await apiRequest('/chat/send', {
-      method: 'POST',
-      body: JSON.stringify({
-        session_id: currentSession.id,
-        content,
-        mode: activeMode,
-        selected_ai_ids: selectedAIIds,
-      }),
-    })
-
-    if (!res.ok) throw new Error('发送失败')
-    const data = await res.json()
-
-    set((state: any) => ({
-      messages: [
-        ...state.messages.filter((m: ChatMessage) => !m.metadata?.thinking),
-        ...data.messages,
-      ],
-      isSending: false,
-    }))
-
-    // 处理本地 Ollama AI
-    if (data.local_ai_calls && data.local_ai_calls.length > 0) {
-      const sessionMessages = get().messages
-        .filter((m: ChatMessage) => m.sender_type !== 'system' && !m.metadata?.thinking)
-        .map((m: ChatMessage) => ({ role: m.sender_type === 'user' ? 'user' : 'assistant', content: m.content }))
-
-      for (const localAI of data.local_ai_calls) {
-        const thinkingId = `thinking-local-${localAI.id}`
-        set((state: any) => ({
-          messages: [...state.messages, {
-            id: thinkingId, session_id: currentSession.id,
-            sender_type: 'ai' as const, sender_name: localAI.name,
-            sender_avatar: localAI.avatar, content: '...',
-            metadata: { thinking: true }, created_at: new Date().toISOString(),
-          }]
-        }))
-        try {
-          const reply = await callOllamaLocal({
-            name: localAI.name, avatar: localAI.avatar,
-            model: localAI.model, base_url: localAI.base_url,
-            system_prompt: localAI.system_prompt,
-            messages: sessionMessages,
-          })
-          let savedMsg: ChatMessage | null = null
-          try {
-            const saveRes = await apiRequest('/chat/save_local', {
-              method: 'POST',
-              body: JSON.stringify({
-                session_id: currentSession.id,
-                sender_id: localAI.id, sender_name: localAI.name,
-                sender_avatar: localAI.avatar, content: reply, model: localAI.model,
-              }),
-            })
-            if (saveRes.ok) { const d = await saveRes.json(); savedMsg = d.message }
-          } catch { /* 保存失败不影响显示 */ }
-
-          const localMsg: ChatMessage = savedMsg || {
-            id: `local-${localAI.id}-${Date.now()}`,
-            session_id: currentSession.id,
-            sender_type: 'ai', sender_id: localAI.id,
-            sender_name: localAI.name, sender_avatar: localAI.avatar,
-            content: reply, metadata: { model: localAI.model },
-            created_at: new Date().toISOString(),
-          }
-          set((state: any) => ({
-            messages: [...state.messages.filter((m: ChatMessage) => m.id !== thinkingId), localMsg]
-          }))
-        } catch (err) {
-          const errMsg: ChatMessage = {
-            id: `local-err-${localAI.id}-${Date.now()}`,
-            session_id: currentSession.id,
-            sender_type: 'ai', sender_name: localAI.name, sender_avatar: localAI.avatar,
-            content: `❌ 本地模型调用失败: ${(err as Error).message}`,
-            created_at: new Date().toISOString(),
-          }
-          set((state: any) => ({
-            messages: [...state.messages.filter((m: ChatMessage) => m.id !== thinkingId), errMsg]
-          }))
-        }
-      }
-    }
-
-    get().loadSessions()
-  } catch (e) {
-    set((state: any) => ({
-      messages: state.messages.filter((m: ChatMessage) => !m.metadata?.thinking),
-      isSending: false,
-    }))
-    throw e
-  }
-}
-
-// ---- 讨论模式：SSE 流式接收 ----
+// ---- 统一 SSE 发送处理 ----
 async function handleSSESend(
   content: string,
   currentSession: ChatSession,
@@ -262,7 +142,6 @@ async function handleSSESend(
   set: any,
   get: any
 ) {
-  // 直接从 store 读 token，不需要单独的 getToken 函数
   const token = useAuthStore.getState().token
 
   let response: Response
@@ -298,8 +177,8 @@ async function handleSSESend(
 
   const decoder = new TextDecoder()
   let buffer = ''
-  // 当前思考中气泡的 id，收到真实消息后替换掉
-  let currentThinkingId: string | null = null
+  // 记录每个 AI 的思考中气泡 id，收到真实消息时替换
+  const thinkingIds: Record<string, string> = {}
 
   try {
     while (true) {
@@ -307,8 +186,6 @@ async function handleSSESend(
       if (done) break
 
       buffer += decoder.decode(value, { stream: true })
-
-      // SSE 每条消息以 \n\n 分隔
       const parts = buffer.split('\n\n')
       buffer = parts.pop() || ''
 
@@ -328,9 +205,9 @@ async function handleSSESend(
           const data = JSON.parse(dataStr)
 
           if (eventType === 'thinking') {
-            // 显示某个AI的思考中气泡
+            // 显示某个 AI 的思考中气泡
             const thinkingId = `thinking-${data.ai_id}-${Date.now()}`
-            currentThinkingId = thinkingId
+            thinkingIds[data.ai_id] = thinkingId
             const thinkingMsg: ChatMessage = {
               id: thinkingId,
               session_id: currentSession.id,
@@ -344,14 +221,24 @@ async function handleSSESend(
             set((state: any) => ({ messages: [...state.messages, thinkingMsg] }))
 
           } else if (eventType === 'message') {
-            // 收到真实消息，替换思考中气泡
+            // 收到真实消息，替换对应的思考中气泡
+            // 通过 sender_id 匹配
+            const thinkingId = data.sender_id ? thinkingIds[data.sender_id] : null
+            if (thinkingId) delete thinkingIds[data.sender_id]
+
             set((state: any) => {
-              const filtered = currentThinkingId
-                ? state.messages.filter((m: ChatMessage) => m.id !== currentThinkingId)
+              const filtered = thinkingId
+                ? state.messages.filter((m: ChatMessage) => m.id !== thinkingId)
                 : state.messages
-              currentThinkingId = null
               return { messages: [...filtered, data] }
             })
+
+          } else if (eventType === 'local_ai_calls') {
+            // 处理本地 Ollama AI
+            const localAICalls = Array.isArray(data) ? data : []
+            if (localAICalls.length > 0) {
+              handleLocalAIs(localAICalls, currentSession, set, get)
+            }
 
           } else if (eventType === 'done') {
             set({ isSending: false })
@@ -364,11 +251,84 @@ async function handleSSESend(
     }
   } finally {
     reader.releaseLock()
-    // 确保状态复位，清理残留的思考中气泡
+    // 清理残留的思考中气泡，确保状态干净
     set((state: any) => ({
       isSending: false,
       messages: state.messages.filter((m: ChatMessage) => !m.metadata?.thinking),
     }))
     get().loadSessions()
+  }
+}
+
+// ---- 处理本地 Ollama AI（前端直接调用）----
+async function handleLocalAIs(
+  localAICalls: any[],
+  currentSession: ChatSession,
+  set: any,
+  get: any
+) {
+  const sessionMessages = get().messages
+    .filter((m: ChatMessage) => m.sender_type !== 'system' && !m.metadata?.thinking)
+    .map((m: ChatMessage) => ({ role: m.sender_type === 'user' ? 'user' : 'assistant', content: m.content }))
+
+  for (const localAI of localAICalls) {
+    const thinkingId = `thinking-local-${localAI.id}-${Date.now()}`
+    set((state: any) => ({
+      messages: [...state.messages, {
+        id: thinkingId,
+        session_id: currentSession.id,
+        sender_type: 'ai' as const,
+        sender_name: localAI.name,
+        sender_avatar: localAI.avatar,
+        content: '...',
+        metadata: { thinking: true },
+        created_at: new Date().toISOString(),
+      }]
+    }))
+
+    try {
+      const reply = await callOllamaLocal({
+        name: localAI.name, avatar: localAI.avatar,
+        model: localAI.model, base_url: localAI.base_url,
+        system_prompt: localAI.system_prompt,
+        messages: sessionMessages,
+      })
+
+      let savedMsg: ChatMessage | null = null
+      try {
+        const saveRes = await apiRequest('/chat/save_local', {
+          method: 'POST',
+          body: JSON.stringify({
+            session_id: currentSession.id,
+            sender_id: localAI.id, sender_name: localAI.name,
+            sender_avatar: localAI.avatar, content: reply, model: localAI.model,
+          }),
+        })
+        if (saveRes.ok) { const d = await saveRes.json(); savedMsg = d.message }
+      } catch { /* 保存失败不影响显示 */ }
+
+      const localMsg: ChatMessage = savedMsg || {
+        id: `local-${localAI.id}-${Date.now()}`,
+        session_id: currentSession.id,
+        sender_type: 'ai', sender_id: localAI.id,
+        sender_name: localAI.name, sender_avatar: localAI.avatar,
+        content: reply, metadata: { model: localAI.model },
+        created_at: new Date().toISOString(),
+      }
+      set((state: any) => ({
+        messages: [...state.messages.filter((m: ChatMessage) => m.id !== thinkingId), localMsg]
+      }))
+    } catch (err) {
+      const errMsg: ChatMessage = {
+        id: `local-err-${localAI.id}-${Date.now()}`,
+        session_id: currentSession.id,
+        sender_type: 'ai', sender_name: localAI.name, sender_avatar: localAI.avatar,
+        content: `❌ 本地模型调用失败: ${(err as Error).message}`,
+        created_at: new Date().toISOString(),
+      }
+      set((state: any) => ({
+        messages: [...state.messages.filter((m: ChatMessage) => m.id !== thinkingId), errMsg]
+      }))
+    }
   }
 }
