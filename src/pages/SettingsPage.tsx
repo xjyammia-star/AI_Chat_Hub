@@ -12,9 +12,8 @@ type SettingsTab = 'ai_members' | 'chat_modes' | 'profile'
 
 const MODE_KEYS: ChatMode[] = ['normal', 'judge', 'bidding', 'shadow', 'rollcall']
 
-// 各模式的 config 字段说明，用于生成提示词输入框
 const MODE_PROMPT_FIELDS: Record<string, Array<{ key: string; label: string; placeholder: string; rows?: number }>> = {
-  normal: [],  // 普通模式无额外提示词
+  normal: [],
   bidding: [
     { key: 'bidding_prompt', label: '竞标提示词', rows: 3,
       placeholder: '请针对用户的问题提交你的最佳方案。要有创意，要具体，要有说服力。' },
@@ -43,7 +42,6 @@ const MODE_PROMPT_FIELDS: Record<string, Array<{ key: string; label: string; pla
   ],
 }
 
-// 自定义模式通用提示词字段
 const CUSTOM_MODE_PROMPT_FIELDS = [
   { key: 'default_prompt', label: '模式提示词', rows: 4,
     placeholder: '描述这个模式下AI应该如何工作，例如：你正在参与一场辩论，请旗帜鲜明地支持你的立场...' },
@@ -352,7 +350,6 @@ function ChatModesSettings() {
   }
 
   const handleDeleteMode = async (id: string, modeKey: string) => {
-    // 允许删除所有模式（包括内置），用户自己决定
     if (!confirm(`确认删除「${modeKey}」模式？${MODE_KEYS.includes(modeKey as ChatMode) ? '\n⚠️ 这是内置模式，删除后聊天界面将无法使用此模式。' : ''}`)) return
     const res = await apiRequest('/settings?type=modes', { method: 'DELETE', body: JSON.stringify({ id }) })
     if (res.ok) { toast.success('已删除'); load() }
@@ -378,7 +375,6 @@ function ChatModesSettings() {
         </button>
       </div>
 
-      {/* 新增模式表单 */}
       {showAddMode && (
         <div className="card" style={{ marginBottom: 16 }}>
           <h3 style={{ fontSize: 14, fontWeight: 500, marginBottom: 14 }}>新增自定义模式</h3>
@@ -416,7 +412,6 @@ function ChatModesSettings() {
         </div>
       )}
 
-      {/* 模式列表 */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {modes.map((mode) => {
           const isBuiltin = MODE_KEYS.includes(mode.mode_key as ChatMode)
@@ -433,7 +428,7 @@ function ChatModesSettings() {
                       {mode.mode_key}
                     </span>
                     {isBuiltin && <span style={{ fontSize: 11, color: 'var(--text-muted)', border: '1px solid var(--border)', padding: '1px 6px', borderRadius: 10 }}>内置</span>}
-                    {isDiscussionMode && <span style={{ fontSize: 11, color: '#f472b6', border: '1px solid rgba(244,114,182,0.3)', padding: '1px 6px', borderRadius: 10 }}>💬 讨论模式</span>}
+                    {isDiscussionMode && <span style={{ fontSize: 11, color: '#38bdf8', border: '1px solid rgba(56,189,248,0.3)', padding: '1px 6px', borderRadius: 10 }}>💬 讨论模式</span>}
                     <span style={{ fontSize: 11, padding: '1px 8px', borderRadius: 10, background: mode.is_enabled ? 'rgba(16,185,129,0.1)' : 'rgba(107,114,128,0.1)', color: mode.is_enabled ? 'var(--green)' : 'var(--text-muted)' }}>
                       {mode.is_enabled ? '启用' : '已禁用'}
                     </span>
@@ -458,7 +453,6 @@ function ChatModesSettings() {
                 </div>
               </div>
 
-              {/* 展开编辑区 */}
               {isExpanded && editingMode && (
                 <div style={{ marginTop: 16, borderTop: '1px solid var(--border)', paddingTop: 16 }}>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
@@ -474,14 +468,12 @@ function ChatModesSettings() {
                     </div>
                   </div>
 
-                  {/* ---- 提示词编辑区 ---- */}
                   <PromptEditor
                     modeKey={mode.mode_key}
                     config={editingMode.config}
                     onChange={(newConfig) => setEditingMode({ ...editingMode, config: newConfig })}
                   />
 
-                  {/* ---- AI 角色分配 ---- */}
                   <div style={{ marginBottom: 16 }}>
                     <label className="form-label">AI 角色分配</label>
                     <ModeRoleAssigner
@@ -492,7 +484,6 @@ function ChatModesSettings() {
                     />
                   </div>
 
-                  {/* ---- 自由讨论专属配置 ---- */}
                   {(mode.mode_key === 'discussion' || editingMode.config?.discussion_mode === true) && (
                     <DiscussionConfig
                       config={editingMode.config}
@@ -501,7 +492,6 @@ function ChatModesSettings() {
                     />
                   )}
 
-                  {/* ---- JSON 高级配置 ---- */}
                   <div style={{ marginBottom: 16 }}>
                     <label className="form-label">
                       高级配置（JSON）
@@ -532,7 +522,7 @@ function ChatModesSettings() {
   )
 }
 
-// ---- 提示词编辑器（根据模式动态显示对应字段）----
+// ---- 提示词编辑器 ----
 function PromptEditor({ modeKey, config, onChange }: {
   modeKey: string; config: Record<string, unknown>; onChange: (c: Record<string, unknown>) => void
 }) {
@@ -567,10 +557,12 @@ function PromptEditor({ modeKey, config, onChange }: {
   )
 }
 
-// ---- 自由讨论专属配置 ----
+// ---- 自由讨论专属配置（修复：summary_ai_id 存 AI 的 ID 而非下标）----
 function DiscussionConfig({ config, members, onChange }: {
   config: Record<string, unknown>; members: AIMember[]; onChange: (c: Record<string, unknown>) => void
 }) {
+  const enabledMembers = members.filter(m => m.is_enabled)
+
   return (
     <div style={{ marginBottom: 16, padding: 14, background: 'rgba(244,114,182,0.06)', border: '1px solid rgba(244,114,182,0.2)', borderRadius: 10 }}>
       <div style={{ fontSize: 13, fontWeight: 500, color: '#f472b6', marginBottom: 12 }}>💬 自由讨论设置</div>
@@ -597,22 +589,22 @@ function DiscussionConfig({ config, members, onChange }: {
         </div>
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-        <div>
-          <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <input type="checkbox"
-              checked={config.enable_summary !== false}
-              onChange={(e) => onChange({ ...config, enable_summary: e.target.checked })} />
-            讨论结束后自动生成总结
-          </label>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input type="checkbox"
+            checked={config.enable_summary !== false}
+            onChange={(e) => onChange({ ...config, enable_summary: e.target.checked })} />
+          <label className="form-label" style={{ margin: 0 }}>讨论结束后自动生成总结</label>
         </div>
         {config.enable_summary !== false && (
           <div>
             <label className="form-label">由哪个 AI 做总结</label>
+            {/* 【修复】存 AI 的 ID，不再用下标，顺序变化也不影响 */}
             <select className="form-input"
-              value={(config.summary_ai_index as number) ?? 0}
-              onChange={(e) => onChange({ ...config, summary_ai_index: parseInt(e.target.value) })}>
-              {members.filter(m => m.is_enabled).map((m, i) => (
-                <option key={m.id} value={i}>{m.custom_name || m.name}</option>
+              value={(config.summary_ai_id as string) ?? ''}
+              onChange={(e) => onChange({ ...config, summary_ai_id: e.target.value || undefined })}>
+              <option value="">自动（第一个AI）</option>
+              {enabledMembers.map((m) => (
+                <option key={m.id} value={m.id}>{m.custom_name || m.name}</option>
               ))}
             </select>
           </div>
