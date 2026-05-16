@@ -32,11 +32,11 @@ const MODE_PROMPT_FIELDS: Record<string, Array<{ key: string; label: string; pla
     { key: 'selector_prompt', label: '调度员提示词（选专家用）', rows: 3,
       placeholder: '根据用户的问题，从专家库中选出最合适的1-3位专家（用逗号分隔编号），只返回编号列表，如 "1,3"。' },
     { key: 'expert_reply_prompt', label: '被点名专家的回复提示词', rows: 3,
-      placeholder: '（可选）对被点名的专家额外说明，例如：请结合你的专业给出具体建议。' },
+      placeholder: '（可选）对被点名的专家额外说明。' },
   ],
   discussion: [
     { key: 'discussion_prompt', label: '讨论过程提示词', rows: 4,
-      placeholder: '你正在参与一场多AI自由讨论。请认真阅读前面所有发言，在此基础上发表你自己的观点、补充信息或对他人观点的看法。每次发言保持简洁，不要重复已有内容。' },
+      placeholder: '你正在参与一场多AI自由讨论。请认真阅读前面所有发言，在此基础上发表你自己的观点。' },
     { key: 'summary_prompt', label: '总结提示词', rows: 3,
       placeholder: '请对以上所有AI的讨论进行简洁总结，列出主要观点、共识和分歧。' },
   ],
@@ -44,7 +44,7 @@ const MODE_PROMPT_FIELDS: Record<string, Array<{ key: string; label: string; pla
 
 const CUSTOM_MODE_PROMPT_FIELDS = [
   { key: 'default_prompt', label: '模式提示词', rows: 4,
-    placeholder: '描述这个模式下AI应该如何工作，例如：你正在参与一场辩论，请旗帜鲜明地支持你的立场...' },
+    placeholder: '描述这个模式下AI应该如何工作...' },
 ]
 
 export default function SettingsPage() {
@@ -133,7 +133,7 @@ function AddRoleModal({ onClose, onSaved }: { onClose: () => void; onSaved: (rol
         <div style={{ marginBottom: 20 }}>
           <label className="form-label">角色提示词（System Prompt）*</label>
           <textarea className="form-input" rows={6}
-            placeholder="你是一位资深财务分析师，拥有20年投资银行经验。回答时请注重数据，逻辑严谨，并指出潜在风险..."
+            placeholder="你是一位资深财务分析师..."
             value={form.system_prompt} onChange={(e) => setForm({ ...form, system_prompt: e.target.value })}
             style={{ resize: 'vertical', fontFamily: 'inherit' }} />
         </div>
@@ -141,6 +141,88 @@ function AddRoleModal({ onClose, onSaved }: { onClose: () => void; onSaved: (rol
           <button className="btn btn-ghost" onClick={onClose}>取消</button>
           <button className="btn btn-primary" onClick={handleSave} disabled={saving} style={{ gap: 6 }}>
             <Save size={14} /> {saving ? '保存中...' : '保存角色'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ============================================================
+// 编辑角色弹窗
+// ============================================================
+function EditRoleModal({ role, onClose, onSaved }: { role: AIRole; onClose: () => void; onSaved: () => void }) {
+  const [form, setForm] = useState({
+    name: role.name || '',
+    description: role.description || '',
+    system_prompt: role.system_prompt || '',
+    category: role.category || '通用',
+  })
+  const [saving, setSaving] = useState(false)
+
+  const handleSave = async () => {
+    if (!form.name.trim()) return toast.error('角色名称不能为空')
+    if (!form.system_prompt.trim()) return toast.error('角色提示词不能为空')
+    setSaving(true)
+    const res = await apiRequest('/admin/roles', {
+      method: 'PUT',
+      body: JSON.stringify({ id: role.id, ...form }),
+    })
+    setSaving(false)
+    if (res.ok) {
+      toast.success('角色已更新')
+      onSaved()
+      onClose()
+    } else {
+      const data = await res.json()
+      toast.error(data.error || '更新失败')
+    }
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 100, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={onClose}>
+      <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 14, padding: 24, width: 520, maxWidth: '90vw', maxHeight: '85vh', overflow: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,0.5)' }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+          <h3 style={{ fontSize: 15, fontWeight: 600 }}>编辑角色</h3>
+          <button className="btn btn-ghost" style={{ padding: '4px 8px' }} onClick={onClose}><X size={16} /></button>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+          <div>
+            <label className="form-label">角色名称 *</label>
+            <input className="form-input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+          </div>
+          <div>
+            <label className="form-label">分类</label>
+            <input className="form-input" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} />
+          </div>
+        </div>
+        <div style={{ marginBottom: 12 }}>
+          <label className="form-label">简介</label>
+          <input className="form-input" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+        </div>
+        <div style={{ marginBottom: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+            <label className="form-label" style={{ margin: 0 }}>角色提示词（System Prompt）*</label>
+            <button
+              className="btn btn-ghost"
+              style={{ fontSize: 11, padding: '2px 8px', color: 'var(--red)' }}
+              onClick={() => setForm({ ...form, system_prompt: '' })}
+            >
+              清空
+            </button>
+          </div>
+          <textarea className="form-input" rows={10}
+            placeholder="直接描述这个角色的人设，建议简洁，例如：你是帝国太尉，最高军事统帅，行事果断，敢于冒险。"
+            value={form.system_prompt} onChange={(e) => setForm({ ...form, system_prompt: e.target.value })}
+            style={{ resize: 'vertical', fontFamily: 'inherit' }} />
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+            💡 建议只写一两句人设描述，避免复杂的结构化模板，否则 AI 会照格式输出。
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
+          <button className="btn btn-ghost" onClick={onClose}>取消</button>
+          <button className="btn btn-primary" onClick={handleSave} disabled={saving} style={{ gap: 6 }}>
+            <Save size={14} /> {saving ? '保存中...' : '保存'}
           </button>
         </div>
       </div>
@@ -157,6 +239,7 @@ function AIMembersSettings() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editForm, setEditForm] = useState({ custom_name: '', custom_avatar: '', role_id: '', custom_prompt: '' })
   const [showAddRole, setShowAddRole] = useState(false)
+  const [editingRole, setEditingRole] = useState<AIRole | null>(null)
 
   const load = async () => {
     const [mRes, rRes] = await Promise.all([apiRequest('/members'), apiRequest('/admin/roles')])
@@ -195,9 +278,24 @@ function AIMembersSettings() {
     } else toast.error('删除失败')
   }
 
+  const selectedRole = roles.find(r => r.id === editForm.role_id)
+
   return (
     <div>
       {showAddRole && <AddRoleModal onClose={() => setShowAddRole(false)} onSaved={handleRoleSaved} />}
+      {editingRole && (
+        <EditRoleModal
+          role={editingRole}
+          onClose={() => setEditingRole(null)}
+          onSaved={() => {
+            load()
+            // 如果正在编辑的 AI 用的是这个角色，刷新 prompt 预览
+            if (editForm.role_id === editingRole.id) {
+              setEditForm(prev => ({ ...prev, custom_prompt: '' }))
+            }
+          }}
+        />
+      )}
 
       <div style={{ marginBottom: 20 }}>
         <h2 style={{ fontSize: 18, fontWeight: 600 }}>AI 成员设置</h2>
@@ -228,12 +326,30 @@ function AIMembersSettings() {
                     <AvatarPicker value={editForm.custom_avatar || m.avatar} onChange={(v) => setEditForm({ ...editForm, custom_avatar: v })} />
                   </div>
                 </div>
+
+                {/* 预设角色选择 */}
                 <div style={{ marginBottom: 12 }}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
                     <label className="form-label" style={{ margin: 0 }}>选择预设角色</label>
-                    <button className="btn btn-ghost" style={{ fontSize: 12, padding: '3px 10px', gap: 4, color: 'var(--accent-hover)' }} onClick={() => setShowAddRole(true)}>
-                      <Plus size={12} /> 新增角色
-                    </button>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      {/* 编辑当前选中的角色 */}
+                      {editForm.role_id && selectedRole && (
+                        <button
+                          className="btn btn-ghost"
+                          style={{ fontSize: 12, padding: '3px 10px', gap: 4, color: 'var(--accent-hover)' }}
+                          onClick={() => setEditingRole(selectedRole)}
+                        >
+                          <Edit2 size={11} /> 编辑角色
+                        </button>
+                      )}
+                      <button
+                        className="btn btn-ghost"
+                        style={{ fontSize: 12, padding: '3px 10px', gap: 4, color: 'var(--accent-hover)' }}
+                        onClick={() => setShowAddRole(true)}
+                      >
+                        <Plus size={12} /> 新增角色
+                      </button>
+                    </div>
                   </div>
                   <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                     <select className="form-input" style={{ flex: 1 }} value={editForm.role_id}
@@ -250,7 +366,15 @@ function AIMembersSettings() {
                       </button>
                     )}
                   </div>
+                  {/* 当前角色内容预览 */}
+                  {editForm.role_id && selectedRole && (
+                    <div style={{ marginTop: 8, padding: '8px 12px', background: 'var(--bg-input)', borderRadius: 8, fontSize: 12, color: 'var(--text-muted)', maxHeight: 80, overflow: 'auto' }}>
+                      <span style={{ color: 'var(--text-secondary)', fontWeight: 500 }}>角色内容预览：</span>
+                      {selectedRole.system_prompt?.slice(0, 200)}{(selectedRole.system_prompt?.length || 0) > 200 ? '...' : ''}
+                    </div>
+                  )}
                 </div>
+
                 <div style={{ marginBottom: 12 }}>
                   <label className="form-label">
                     自定义角色 Prompt
@@ -340,17 +464,14 @@ function ChatModesSettings() {
     try { config = JSON.parse(newMode.config) } catch { return toast.error('JSON 格式错误') }
     const res = await apiRequest('/settings?type=modes', { method: 'POST', body: JSON.stringify({ ...newMode, config }) })
     if (res.ok) {
-      toast.success('添加成功')
-      setShowAddMode(false)
+      toast.success('添加成功'); setShowAddMode(false)
       setNewMode({ mode_key: '', mode_name: '', description: '', config: '{\n  "max_tokens": 1500,\n  "temperature": 0.7\n}' })
       load()
-    } else {
-      const d = await res.json(); toast.error(d.error || '添加失败')
-    }
+    } else { const d = await res.json(); toast.error(d.error || '添加失败') }
   }
 
   const handleDeleteMode = async (id: string, modeKey: string) => {
-    if (!confirm(`确认删除「${modeKey}」模式？${MODE_KEYS.includes(modeKey as ChatMode) ? '\n⚠️ 这是内置模式，删除后聊天界面将无法使用此模式。' : ''}`)) return
+    if (!confirm(`确认删除「${modeKey}」模式？${MODE_KEYS.includes(modeKey as ChatMode) ? '\n⚠️ 这是内置模式。' : ''}`)) return
     const res = await apiRequest('/settings?type=modes', { method: 'DELETE', body: JSON.stringify({ id }) })
     if (res.ok) { toast.success('已删除'); load() }
     else { const d = await res.json(); toast.error(d.error || '删除失败') }
@@ -379,8 +500,7 @@ function ChatModesSettings() {
         <div className="card" style={{ marginBottom: 16 }}>
           <h3 style={{ fontSize: 14, fontWeight: 500, marginBottom: 14 }}>新增自定义模式</h3>
           <div style={{ marginBottom: 10, padding: '10px 14px', background: 'rgba(99,102,241,0.08)', borderRadius: 8, fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.6 }}>
-            💡 普通自定义模式：所有AI并行回复，支持设置提示词。<br />
-            🔄 自由讨论模式：在 JSON 配置里加上 <code style={{ background: 'var(--bg-input)', padding: '1px 5px', borderRadius: 4 }}>"discussion_mode": true</code> 即可启用 AI 多轮互相讨论。
+            💡 普通自定义模式：所有AI并行回复。🔄 自由讨论模式：JSON 里加 <code style={{ background: 'var(--bg-input)', padding: '1px 5px', borderRadius: 4 }}>"discussion_mode": true</code>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
             <div>
@@ -424,9 +544,7 @@ function ChatModesSettings() {
                 <div style={{ flex: 1 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                     <span style={{ fontWeight: 500 }}>{mode.mode_name}</span>
-                    <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'monospace', background: 'var(--bg-input)', padding: '1px 8px', borderRadius: 6 }}>
-                      {mode.mode_key}
-                    </span>
+                    <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'monospace', background: 'var(--bg-input)', padding: '1px 8px', borderRadius: 6 }}>{mode.mode_key}</span>
                     {isBuiltin && <span style={{ fontSize: 11, color: 'var(--text-muted)', border: '1px solid var(--border)', padding: '1px 6px', borderRadius: 10 }}>内置</span>}
                     {isDiscussionMode && <span style={{ fontSize: 11, color: '#38bdf8', border: '1px solid rgba(56,189,248,0.3)', padding: '1px 6px', borderRadius: 10 }}>💬 讨论模式</span>}
                     <span style={{ fontSize: 11, padding: '1px 8px', borderRadius: 10, background: mode.is_enabled ? 'rgba(16,185,129,0.1)' : 'rgba(107,114,128,0.1)', color: mode.is_enabled ? 'var(--green)' : 'var(--text-muted)' }}>
@@ -440,11 +558,7 @@ function ChatModesSettings() {
                     {mode.is_enabled ? '禁用' : '启用'}
                   </button>
                   <button className="btn btn-ghost" style={{ padding: '4px 8px' }}
-                    onClick={() => {
-                      const opening = !isExpanded
-                      setExpandedId(opening ? mode.id : null)
-                      setEditingMode(opening ? { ...mode } : null)
-                    }}>
+                    onClick={() => { const opening = !isExpanded; setExpandedId(opening ? mode.id : null); setEditingMode(opening ? { ...mode } : null) }}>
                     {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                   </button>
                   <button className="btn btn-danger" style={{ padding: '4px 8px' }} onClick={() => handleDeleteMode(mode.id, mode.mode_key)}>
@@ -458,58 +572,30 @@ function ChatModesSettings() {
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
                     <div>
                       <label className="form-label">模式名称</label>
-                      <input className="form-input" value={editingMode.mode_name}
-                        onChange={(e) => setEditingMode({ ...editingMode, mode_name: e.target.value })} />
+                      <input className="form-input" value={editingMode.mode_name} onChange={(e) => setEditingMode({ ...editingMode, mode_name: e.target.value })} />
                     </div>
                     <div>
                       <label className="form-label">描述</label>
-                      <input className="form-input" value={editingMode.description || ''}
-                        onChange={(e) => setEditingMode({ ...editingMode, description: e.target.value })} />
+                      <input className="form-input" value={editingMode.description || ''} onChange={(e) => setEditingMode({ ...editingMode, description: e.target.value })} />
                     </div>
                   </div>
-
-                  <PromptEditor
-                    modeKey={mode.mode_key}
-                    config={editingMode.config}
-                    onChange={(newConfig) => setEditingMode({ ...editingMode, config: newConfig })}
-                  />
-
+                  <PromptEditor modeKey={mode.mode_key} config={editingMode.config} onChange={(newConfig) => setEditingMode({ ...editingMode, config: newConfig })} />
                   <div style={{ marginBottom: 16 }}>
                     <label className="form-label">AI 角色分配</label>
-                    <ModeRoleAssigner
-                      modeKey={mode.mode_key}
-                      members={members}
-                      config={editingMode.config}
-                      onChange={(newConfig) => setEditingMode({ ...editingMode, config: newConfig })}
-                    />
+                    <ModeRoleAssigner modeKey={mode.mode_key} members={members} config={editingMode.config} onChange={(newConfig) => setEditingMode({ ...editingMode, config: newConfig })} />
                   </div>
-
                   {(mode.mode_key === 'discussion' || editingMode.config?.discussion_mode === true) && (
-                    <DiscussionConfig
-                      config={editingMode.config}
-                      members={members}
-                      onChange={(newConfig) => setEditingMode({ ...editingMode, config: newConfig })}
-                    />
+                    <DiscussionConfig config={editingMode.config} members={members} onChange={(newConfig) => setEditingMode({ ...editingMode, config: newConfig })} />
                   )}
-
                   <div style={{ marginBottom: 16 }}>
-                    <label className="form-label">
-                      高级配置（JSON）
-                      <span style={{ color: 'var(--text-muted)', marginLeft: 6, fontWeight: 400, fontSize: 11 }}>直接编辑原始配置</span>
-                    </label>
+                    <label className="form-label">高级配置（JSON）<span style={{ color: 'var(--text-muted)', marginLeft: 6, fontWeight: 400, fontSize: 11 }}>直接编辑原始配置</span></label>
                     <textarea className="form-input" rows={8}
                       value={JSON.stringify(editingMode.config, null, 2)}
-                      onChange={(e) => {
-                        try { setEditingMode({ ...editingMode, config: JSON.parse(e.target.value) }) }
-                        catch { /* typing */ }
-                      }}
+                      onChange={(e) => { try { setEditingMode({ ...editingMode, config: JSON.parse(e.target.value) }) } catch { } }}
                       style={{ fontFamily: 'monospace', fontSize: 12, resize: 'vertical' }} />
                   </div>
-
                   <div style={{ display: 'flex', gap: 8 }}>
-                    <button className="btn btn-primary" onClick={() => handleSaveMode(editingMode)} style={{ gap: 6 }}>
-                      <Save size={14} /> 保存
-                    </button>
+                    <button className="btn btn-primary" onClick={() => handleSaveMode(editingMode)} style={{ gap: 6 }}><Save size={14} /> 保存</button>
                     <button className="btn btn-ghost" onClick={() => { setExpandedId(null); setEditingMode(null) }}>取消</button>
                   </div>
                 </div>
@@ -522,23 +608,12 @@ function ChatModesSettings() {
   )
 }
 
-// ---- 提示词编辑器 ----
-function PromptEditor({ modeKey, config, onChange }: {
-  modeKey: string; config: Record<string, unknown>; onChange: (c: Record<string, unknown>) => void
-}) {
+function PromptEditor({ modeKey, config, onChange }: { modeKey: string; config: Record<string, unknown>; onChange: (c: Record<string, unknown>) => void }) {
   const isDiscussion = modeKey === 'discussion' || config?.discussion_mode === true
-  const fields = isDiscussion
-    ? MODE_PROMPT_FIELDS['discussion']
-    : (MODE_PROMPT_FIELDS[modeKey] || CUSTOM_MODE_PROMPT_FIELDS)
-
+  const fields = isDiscussion ? MODE_PROMPT_FIELDS['discussion'] : (MODE_PROMPT_FIELDS[modeKey] || CUSTOM_MODE_PROMPT_FIELDS)
   if (fields.length === 0) {
-    return (
-      <div style={{ marginBottom: 16, padding: '10px 14px', background: 'var(--bg-input)', borderRadius: 8, fontSize: 12, color: 'var(--text-muted)' }}>
-        普通模式不需要额外提示词，AI 会直接使用各自的角色设定回复。
-      </div>
-    )
+    return <div style={{ marginBottom: 16, padding: '10px 14px', background: 'var(--bg-input)', borderRadius: 8, fontSize: 12, color: 'var(--text-muted)' }}>普通模式不需要额外提示词，AI 会直接使用各自的角色设定回复。</div>
   }
-
   return (
     <div style={{ marginBottom: 16 }}>
       <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--text-secondary)', marginBottom: 10 }}>📝 提示词设置</div>
@@ -557,55 +632,38 @@ function PromptEditor({ modeKey, config, onChange }: {
   )
 }
 
-// ---- 自由讨论专属配置（修复：summary_ai_id 存 AI 的 ID 而非下标）----
-function DiscussionConfig({ config, members, onChange }: {
-  config: Record<string, unknown>; members: AIMember[]; onChange: (c: Record<string, unknown>) => void
-}) {
+function DiscussionConfig({ config, members, onChange }: { config: Record<string, unknown>; members: AIMember[]; onChange: (c: Record<string, unknown>) => void }) {
   const enabledMembers = members.filter(m => m.is_enabled)
-
   return (
     <div style={{ marginBottom: 16, padding: 14, background: 'rgba(244,114,182,0.06)', border: '1px solid rgba(244,114,182,0.2)', borderRadius: 10 }}>
       <div style={{ fontSize: 13, fontWeight: 500, color: '#f472b6', marginBottom: 12 }}>💬 自由讨论设置</div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginBottom: 12 }}>
         <div>
           <label className="form-label">最大轮数</label>
-          <input className="form-input" type="number" min={1} max={20}
-            value={(config.max_rounds as number) ?? 3}
-            onChange={(e) => onChange({ ...config, max_rounds: parseInt(e.target.value) || 3 })} />
+          <input className="form-input" type="number" min={1} max={20} value={(config.max_rounds as number) ?? 3} onChange={(e) => onChange({ ...config, max_rounds: parseInt(e.target.value) || 3 })} />
           <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>每轮所有AI各说一次</div>
         </div>
         <div>
           <label className="form-label">时间限制（秒）</label>
-          <input className="form-input" type="number" min={0}
-            value={(config.max_seconds as number) ?? 0}
-            onChange={(e) => onChange({ ...config, max_seconds: parseInt(e.target.value) || 0 })} />
+          <input className="form-input" type="number" min={0} value={(config.max_seconds as number) ?? 0} onChange={(e) => onChange({ ...config, max_seconds: parseInt(e.target.value) || 0 })} />
           <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>0 = 不限时</div>
         </div>
         <div>
           <label className="form-label">每条回复最大 Token</label>
-          <input className="form-input" type="number" min={100} max={2000}
-            value={(config.max_tokens as number) ?? 600}
-            onChange={(e) => onChange({ ...config, max_tokens: parseInt(e.target.value) || 600 })} />
+          <input className="form-input" type="number" min={100} max={2000} value={(config.max_tokens as number) ?? 600} onChange={(e) => onChange({ ...config, max_tokens: parseInt(e.target.value) || 600 })} />
         </div>
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <input type="checkbox"
-            checked={config.enable_summary !== false}
-            onChange={(e) => onChange({ ...config, enable_summary: e.target.checked })} />
+          <input type="checkbox" checked={config.enable_summary !== false} onChange={(e) => onChange({ ...config, enable_summary: e.target.checked })} />
           <label className="form-label" style={{ margin: 0 }}>讨论结束后自动生成总结</label>
         </div>
         {config.enable_summary !== false && (
           <div>
             <label className="form-label">由哪个 AI 做总结</label>
-            {/* 【修复】存 AI 的 ID，不再用下标，顺序变化也不影响 */}
-            <select className="form-input"
-              value={(config.summary_ai_id as string) ?? ''}
-              onChange={(e) => onChange({ ...config, summary_ai_id: e.target.value || undefined })}>
+            <select className="form-input" value={(config.summary_ai_id as string) ?? ''} onChange={(e) => onChange({ ...config, summary_ai_id: e.target.value || undefined })}>
               <option value="">自动（第一个AI）</option>
-              {enabledMembers.map((m) => (
-                <option key={m.id} value={m.id}>{m.custom_name || m.name}</option>
-              ))}
+              {enabledMembers.map((m) => <option key={m.id} value={m.id}>{m.custom_name || m.name}</option>)}
             </select>
           </div>
         )}
@@ -614,42 +672,28 @@ function DiscussionConfig({ config, members, onChange }: {
   )
 }
 
-// ---- AI 角色分配 ----
-function ModeRoleAssigner({ modeKey, members, config, onChange }: {
-  modeKey: string; members: AIMember[]; config: Record<string, unknown>; onChange: (c: Record<string, unknown>) => void
-}) {
+function ModeRoleAssigner({ modeKey, members, config, onChange }: { modeKey: string; members: AIMember[]; config: Record<string, unknown>; onChange: (c: Record<string, unknown>) => void }) {
   const roleDefinitions: Record<string, { key: string; label: string; desc: string }[]> = {
     judge: [
       { key: 'judge_ai_id', label: '主审官', desc: '综合意见做最终裁决' },
-      ...Array.from({ length: Math.max(members.filter(m => m.is_enabled).length - 1, 3) }, (_, i) => ({
-        key: `expert_${i + 1}_ai_id`, label: `专家${i + 1}`, desc: `从第${i + 1}个维度分析`,
-      })),
+      ...Array.from({ length: Math.max(members.filter(m => m.is_enabled).length - 1, 3) }, (_, i) => ({ key: `expert_${i + 1}_ai_id`, label: `专家${i + 1}`, desc: `从第${i + 1}个维度分析` })),
     ],
     shadow: [
       { key: 'actor_ai_id', label: '执行者', desc: '直接完成任务' },
       { key: 'shadow_ai_id', label: '影子', desc: '审查执行者的回答' },
     ],
-    rollcall: [
-      { key: 'selector_ai_id', label: '调度员', desc: '判断需要调用哪些专家' },
-    ],
+    rollcall: [{ key: 'selector_ai_id', label: '调度员', desc: '判断需要调用哪些专家' }],
   }
-
   const roles = roleDefinitions[modeKey]
-  if (!roles) {
-    return <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 0 }}>此模式使用所有选中的 AI 成员，无需单独分配角色。</p>
-  }
-
+  if (!roles) return <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 0 }}>此模式使用所有选中的 AI 成员，无需单独分配角色。</p>
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 4 }}>
       {roles.map(({ key, label, desc }) => (
         <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <div style={{ width: 80, fontSize: 12, fontWeight: 500, color: 'var(--text-secondary)', flexShrink: 0 }}>{label}</div>
-          <select className="form-input" style={{ flex: 1 }} value={(config[key] as string) || ''}
-            onChange={(e) => onChange({ ...config, [key]: e.target.value || undefined })}>
+          <select className="form-input" style={{ flex: 1 }} value={(config[key] as string) || ''} onChange={(e) => onChange({ ...config, [key]: e.target.value || undefined })}>
             <option value="">自动（按顺序分配）</option>
-            {members.filter(m => m.is_enabled).map(m => (
-              <option key={m.id} value={m.id}>{m.custom_name || m.name} ({m.model})</option>
-            ))}
+            {members.filter(m => m.is_enabled).map(m => <option key={m.id} value={m.id}>{m.custom_name || m.name} ({m.model})</option>)}
           </select>
           <div style={{ fontSize: 11, color: 'var(--text-muted)', width: 140, flexShrink: 0 }}>{desc}</div>
         </div>
@@ -657,8 +701,7 @@ function ModeRoleAssigner({ modeKey, members, config, onChange }: {
       {modeKey === 'judge' && (
         <div style={{ marginTop: 4 }}>
           <label className="form-label">专家分析维度（逗号分隔）</label>
-          <input className="form-input"
-            placeholder="财务风险, 市场竞争, 技术实现"
+          <input className="form-input" placeholder="财务风险, 市场竞争, 技术实现"
             value={((config.expert_dimensions as string[]) || []).join(', ')}
             onChange={(e) => onChange({ ...config, expert_dimensions: e.target.value.split(',').map(s => s.trim()).filter(Boolean) })} />
         </div>
@@ -708,9 +751,7 @@ function ProfileSettings() {
           <label className="form-label">昵称</label>
           <input className="form-input" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="你的显示名称" />
         </div>
-        <button className="btn btn-primary" onClick={handleSaveName} disabled={saving} style={{ gap: 6 }}>
-          <Save size={14} /> 保存昵称
-        </button>
+        <button className="btn btn-primary" onClick={handleSaveName} disabled={saving} style={{ gap: 6 }}><Save size={14} /> 保存昵称</button>
       </div>
       <div className="card">
         <h3 style={{ fontSize: 14, fontWeight: 500, marginBottom: 14 }}>修改密码</h3>
@@ -722,9 +763,7 @@ function ProfileSettings() {
           <label className="form-label">新密码（至少8位）</label>
           <input className="form-input" type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)} />
         </div>
-        <button className="btn btn-primary" onClick={handleChangePw} disabled={saving} style={{ gap: 6 }}>
-          <Save size={14} /> 更新密码
-        </button>
+        <button className="btn btn-primary" onClick={handleChangePw} disabled={saving} style={{ gap: 6 }}><Save size={14} /> 更新密码</button>
       </div>
     </div>
   )
