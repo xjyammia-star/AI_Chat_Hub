@@ -1,12 +1,11 @@
 // api/chat/send.ts
-// 核心发送 API — 处理 5 种聊天模式
+// 核心发送 API — 处理 6 种聊天模式（含新增 discussion 自由讨论模式）
 
 import type { VercelRequest, VercelResponse } from '@vercel/node'
 import { requireAuth } from '../_lib/middleware.js'
 import sql from '../_lib/db.js'
 import { decryptKey } from '../_lib/crypto.js'
 
-// ---- AI 调用统一接口 ----
 interface AICallParams {
   provider: string
   model: string
@@ -18,7 +17,6 @@ interface AICallParams {
   temperature?: number
 }
 
-// 每个提供商的默认 base_url
 const DEFAULT_BASE_URLS: Record<string, string> = {
   gemini:    'https://generativelanguage.googleapis.com/v1beta',
   deepseek:  'https://api.deepseek.com/v1',
@@ -32,7 +30,6 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
 
 async function callAI(params: AICallParams): Promise<string> {
   const { provider, model, apiKey, messages, systemPrompt, maxTokens = 1500, temperature = 0.7 } = params
-  // 优先用用户填写的 base_url，否则用默认值
   const baseUrl = (params.baseUrl && params.baseUrl !== 'null' && params.baseUrl.trim() !== '')
     ? params.baseUrl.trim()
     : DEFAULT_BASE_URLS[provider] || ''
@@ -43,15 +40,12 @@ async function callAI(params: AICallParams): Promise<string> {
     ? [{ role: 'system', content: systemPrompt }, ...messages]
     : messages
 
-  // Gemini 格式
   if (provider === 'gemini') {
     const url = `${baseUrl}/models/${model}:generateContent?key=${apiKey}`
     const contents = allMessages
       .filter((m) => m.role !== 'system')
       .map((m) => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] }))
-
     const systemInstruction = allMessages.find((m) => m.role === 'system')
-
     const body: Record<string, unknown> = {
       contents,
       generationConfig: { maxOutputTokens: maxTokens, temperature },
@@ -59,14 +53,12 @@ async function callAI(params: AICallParams): Promise<string> {
     if (systemInstruction) {
       body.systemInstruction = { parts: [{ text: systemInstruction.content }] }
     }
-
     const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const data = await resp.json()
     if (!resp.ok) throw new Error(data.error?.message || 'Gemini API error')
     return data.candidates?.[0]?.content?.parts?.[0]?.text || ''
   }
 
-  // GLM 需要动态生成 JWT Token
   let authToken = apiKey || ''
   if (provider === 'glm' && apiKey && apiKey.includes('.')) {
     const [id, secret] = apiKey.split('.')
@@ -78,7 +70,6 @@ async function callAI(params: AICallParams): Promise<string> {
     authToken = `${header}.${payload}.${sig}`
   }
 
-  // Ollama 本地调用 — 注意：Ollama 在浏览器端直连，这里是服务端备用路径
   if (provider === 'ollama') {
     const ollamaUrl = `${baseUrl.replace('/v1', '')}/api/chat`
     const ollamaBody = { model, messages: allMessages, stream: false }
@@ -88,20 +79,19 @@ async function callAI(params: AICallParams): Promise<string> {
     return data.message?.content || ''
   }
 
-  // OpenAI 兼容格式（DeepSeek / Doubao / OpenAI / GLM）
   const url = `${baseUrl}/chat/completions`
   const body = { model, messages: allMessages, max_tokens: maxTokens, temperature }
-
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (authToken) headers['Authorization'] = `Bearer ${authToken}`
-
   const resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) })
   const data = await resp.json()
   if (!resp.ok) throw new Error(data.error?.message || `API error ${resp.status}`)
   return data.choices?.[0]?.message?.content || ''
 }
 
-// ---- 获取 AI 成员的 API 配置 ----
+// ---- 获取 AI 配置 ----
+// baseSystemPrompt = 群聊规则 + 角色设定
+// 模式提示词在调用时通过 buildSystemPrompt 叠加，不在这里合并，保证互不影响
 async function getAIConfig(memberId: string, memberType: string, userId: string) {
   let member: Record<string, unknown> | undefined
 
@@ -115,7 +105,6 @@ async function getAIConfig(memberId: string, memberType: string, userId: string)
 
   if (!member) return null
 
-  // 获取用户个性化配置（角色prompt）
   const [config] = await sql`
     SELECT uac.*, r.system_prompt as role_prompt
     FROM user_ai_configs uac
@@ -125,7 +114,6 @@ async function getAIConfig(memberId: string, memberType: string, userId: string)
 
   const apiKey = member.api_key_enc ? decryptKey(member.api_key_enc as string) : undefined
 
-  // ---- 群聊基础提示词 ----
   const groupChatPrompt = `你正在参与一个多AI群聊对话。群里有多个来自不同公司的AI助手同时在线，大家共同回应用户的消息。
 
 【群聊基本规则】
@@ -136,9 +124,9 @@ async function getAIConfig(memberId: string, memberType: string, userId: string)
 5. 如果其他AI已经完整回答了问题，你可以补充一个角度或简短表示认同，无需重复。
 6. 保持友好、自然的对话风格，像群聊成员一样参与。`
 
-  // 角色设定拼接在群聊规则后面
-  const rolePrompt = config?.custom_prompt || config?.role_prompt
-  const systemPrompt = rolePrompt
+  const rolePrompt = config?.custom_prompt || config?.role_prompt || null
+
+  const baseSystemPrompt = rolePrompt
     ? `${groupChatPrompt}\n\n【你的角色设定】\n${rolePrompt}`
     : groupChatPrompt
 
@@ -150,19 +138,28 @@ async function getAIConfig(memberId: string, memberType: string, userId: string)
     model: member.model as string,
     apiKey,
     baseUrl: member.base_url as string | undefined,
-    systemPrompt,
+    baseSystemPrompt,
     is_local: member.is_local as boolean,
   }
 }
 
-// ---- 保存消息到数据库 ----
-async function saveMessage(sessionId: string, senderType: string, senderId: string | null, senderName: string, senderAvatar: string | null, content: string, roleInMode?: string, metadata?: Record<string, unknown>) {
+// ---- 叠加模式提示词（不覆盖角色设定）----
+function buildSystemPrompt(baseSystemPrompt: string, modePrompt?: string): string {
+  if (!modePrompt || !modePrompt.trim()) return baseSystemPrompt
+  return `${baseSystemPrompt}\n\n【当前对话模式要求】\n${modePrompt}`
+}
+
+// ---- 保存消息 ----
+async function saveMessage(
+  sessionId: string, senderType: string, senderId: string | null,
+  senderName: string, senderAvatar: string | null, content: string,
+  roleInMode?: string, metadata?: Record<string, unknown>
+) {
   const [msg] = await sql`
     INSERT INTO chat_messages (session_id, sender_type, sender_id, sender_name, sender_avatar, content, role_in_mode, metadata)
     VALUES (${sessionId}, ${senderType}, ${senderId}, ${senderName}, ${senderAvatar}, ${content}, ${roleInMode || null}, ${JSON.stringify(metadata || {})})
     RETURNING *
   `
-  // 更新会话 updated_at
   await sql`UPDATE chat_sessions SET updated_at = NOW() WHERE id = ${sessionId}`
   return msg
 }
@@ -172,17 +169,13 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
   const { session_id, content, mode = 'normal', selected_ai_ids = [] } = req.body
-
   if (!content?.trim()) return res.status(400).json({ error: '消息不能为空' })
 
-  // 验证会话归属
   const [session] = await sql`SELECT * FROM chat_sessions WHERE id = ${session_id} AND user_id = ${authUser.id}`
   if (!session) return res.status(404).json({ error: '会话不存在' })
 
-  // 保存用户消息
   const userMsg = await saveMessage(session_id, 'user', authUser.id, '我', null, content)
 
-  // 获取历史消息（最近20条）
   const history = await sql`
     SELECT sender_type, content FROM chat_messages
     WHERE session_id = ${session_id} AND sender_type != 'system'
@@ -193,8 +186,6 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
     content: m.content,
   }))
 
-  // 获取 AI 成员配置
-  // 如果前端传了 selected_ai_ids 就用，否则自动获取该用户所有可用 AI
   let aiConfigs
   if (selected_ai_ids && selected_ai_ids.length > 0) {
     aiConfigs = await Promise.all(
@@ -205,127 +196,95 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
       })
     )
   } else {
-    // 自动获取该用户所有可用的 AI（系统 + 私人）
     const systemRows = await sql`
       SELECT id FROM system_ai_members
       WHERE is_enabled = true AND (is_public = true OR ${authUser.id}::uuid = ANY(allowed_users) OR ${authUser.role} = 'admin')
     `
-    const userRows = await sql`
-      SELECT id FROM user_ai_members WHERE user_id = ${authUser.id} AND is_enabled = true
-    `
+    const userRows = await sql`SELECT id FROM user_ai_members WHERE user_id = ${authUser.id} AND is_enabled = true`
     const allIds = [
       ...systemRows.map((r: Record<string, string>) => ({ id: r.id, type: 'system' })),
       ...userRows.map((r: Record<string, string>) => ({ id: r.id, type: 'user' })),
     ]
-    aiConfigs = await Promise.all(
-      allIds.map(({ id, type }) => getAIConfig(id, type, authUser.id))
-    )
+    aiConfigs = await Promise.all(allIds.map(({ id, type }) => getAIConfig(id, type, authUser.id)))
   }
-  const allAIs = aiConfigs.filter(Boolean) as NonNullable<Awaited<ReturnType<typeof getAIConfig>>>[]
 
-  // 本地模型由前端直接调用，这里只处理非本地的
+  const allAIs = aiConfigs.filter(Boolean) as NonNullable<Awaited<ReturnType<typeof getAIConfig>>>[]
   const localAIs = allAIs.filter(ai => ai.is_local)
   const validAIs = allAIs.filter(ai => !ai.is_local)
 
-  // 处理 @ 提及：先判断是否有 @ 特定成员
   const mentionMatch = content.match(/@([^\s@]+)/)
   const mentionedName = mentionMatch && mentionMatch[1] !== '所有人' ? mentionMatch[1] : null
 
-  // 过滤本地AI（@ 过滤）
   let activeLocalAIs = localAIs
   if (mentionedName) {
-    const mentionedLocal = localAIs.filter(ai =>
-      ai.name.includes(mentionedName) || mentionedName.includes(ai.name)
-    )
-    // 只有明确匹配到本地AI时才限制，否则保持全部
-    if (mentionedLocal.length > 0) activeLocalAIs = mentionedLocal
-    else activeLocalAIs = []
+    const m = localAIs.filter(ai => ai.name.includes(mentionedName) || mentionedName.includes(ai.name))
+    activeLocalAIs = m.length > 0 ? m : []
   }
 
-  // 过滤服务端AI（@ 过滤）
   let activeAIs = validAIs
   if (mentionedName) {
-    const mentionedServer = validAIs.filter(ai =>
-      ai.name.includes(mentionedName) || mentionedName.includes(ai.name)
-    )
-    if (mentionedServer.length > 0) activeAIs = mentionedServer
-    else activeAIs = []
+    const m = validAIs.filter(ai => ai.name.includes(mentionedName) || mentionedName.includes(ai.name))
+    activeAIs = m.length > 0 ? m : []
   }
 
-  // 如果只有本地模型需要回复（包括 @ 本地AI 的情况）
   if (activeLocalAIs.length > 0 && activeAIs.length === 0) {
     return res.json({
-      messages: [userMsg],
-      session_id,
+      messages: [userMsg], session_id,
       local_ai_calls: activeLocalAIs.map(ai => ({
         id: ai.id, name: ai.name, avatar: ai.avatar,
         model: ai.model, base_url: ai.baseUrl || 'http://localhost:11434',
-        system_prompt: ai.systemPrompt,
+        system_prompt: ai.baseSystemPrompt,
       }))
     })
   }
 
-  // 没有任何AI可以回复
   if (activeAIs.length === 0 && activeLocalAIs.length === 0) {
     const errorMsg = await saveMessage(session_id, 'system', null, 'system', null, '⚠️ 没有可用的 AI 成员，请在右上角选择至少一个 AI')
     return res.json({ messages: [userMsg, errorMsg] })
   }
 
-  // 获取模式配置
   const [modeConfig] = await sql`SELECT * FROM chat_modes WHERE mode_key = ${mode} AND is_enabled = true`
+  const cfg = (modeConfig?.config as Record<string, unknown>) || {}
 
   const resultMessages: unknown[] = [userMsg]
 
   try {
-    // ==================== 模式路由 ====================
 
+    // ==================== 普通模式 ====================
     if (mode === 'normal') {
-      // 普通模式：所有选中的 AI 并行回复
       const replies = await Promise.allSettled(
-        activeAIs.map((ai) =>
-          callAI({
-            provider: ai.provider,
-            model: ai.model,
-            apiKey: ai.apiKey,
-            baseUrl: ai.baseUrl,
-            messages: historyMessages,
-            systemPrompt: ai.systemPrompt,
-            maxTokens: (modeConfig?.config as Record<string, number>)?.max_tokens || 1500,
-            temperature: (modeConfig?.config as Record<string, number>)?.temperature || 0.7,
-          })
-        )
+        activeAIs.map((ai) => callAI({
+          provider: ai.provider, model: ai.model, apiKey: ai.apiKey, baseUrl: ai.baseUrl,
+          messages: historyMessages,
+          systemPrompt: ai.baseSystemPrompt,
+          maxTokens: (cfg.max_tokens as number) || 1500,
+          temperature: (cfg.temperature as number) || 0.7,
+        }))
       )
-
       for (let i = 0; i < activeAIs.length; i++) {
         const ai = activeAIs[i]
         const result = replies[i]
-        const content = result.status === 'fulfilled' ? result.value : `❌ 调用失败: ${(result.reason as Error).message}`
-        const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, content, undefined, { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model })
+        const replyContent = result.status === 'fulfilled' ? result.value : `❌ 调用失败: ${(result.reason as Error).message}`
+        const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, replyContent, undefined, { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model })
         resultMessages.push(msg)
       }
 
+    // ==================== 竞标模式 ====================
     } else if (mode === 'bidding') {
-      // 竞标模式：所有 AI 并行提案
-      const cfg = modeConfig?.config as Record<string, unknown> || {}
+      const biddingModePrompt = (cfg.bidding_prompt as string) || '请针对用户的问题提交你的最佳方案。要有创意，要具体，要有说服力。'
 
       const systemMsg = await saveMessage(session_id, 'system', null, 'system', null, `🏆 竞标模式开始 — ${validAIs.length} 个 AI 同时提交方案`)
       resultMessages.push(systemMsg)
 
       const replies = await Promise.allSettled(
-        validAIs.map((ai) =>
-          callAI({
-            provider: ai.provider,
-            model: ai.model,
-            apiKey: ai.apiKey,
-            baseUrl: ai.baseUrl,
-            messages: [{ role: 'user', content }],
-            systemPrompt: ai.systemPrompt || '请提交你的最佳方案。要有创意，要具体，要有说服力。',
-            maxTokens: (cfg.max_tokens as number) || 1000,
-            temperature: (cfg.temperature as number) || 0.9,
-          })
-        )
+        validAIs.map((ai) => callAI({
+          provider: ai.provider, model: ai.model, apiKey: ai.apiKey, baseUrl: ai.baseUrl,
+          messages: [{ role: 'user', content }],
+          systemPrompt: buildSystemPrompt(ai.baseSystemPrompt, biddingModePrompt),
+          maxTokens: (cfg.max_tokens as number) || 1000,
+          temperature: (cfg.temperature as number) || 0.9,
+        }))
       )
-
       for (let i = 0; i < activeAIs.length; i++) {
         const ai = activeAIs[i]
         const result = replies[i]
@@ -333,73 +292,61 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
         const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, replyContent, '竞标方案', { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model })
         resultMessages.push(msg)
       }
-
       const endMsg = await saveMessage(session_id, 'system', null, 'system', null, '✅ 所有方案已提交，请选出你最满意的方案')
       resultMessages.push(endMsg)
 
+    // ==================== 影子模式 ====================
     } else if (mode === 'shadow') {
-      // 影子模式：第一个 AI 执行，第二个 AI 审查
-      const cfg = modeConfig?.config as Record<string, string> || {}
+      const actorModePrompt = (cfg.actor_prompt as string) || '请直接完成用户的任务，给出最好的答案。'
+      const shadowModePrompt = (cfg.shadow_prompt as string) || '你是审查员。请仔细审查以下回答，找出逻辑漏洞、潜在风险或可改进之处。'
+
       const actor = validAIs[0]
-      const shadow = validAIs[1] || validAIs[0]  // 影子默认用第二个，没有则用同一个
+      const shadow = validAIs[1] || validAIs[0]
 
       const systemMsg = await saveMessage(session_id, 'system', null, 'system', null, `👤 执行者: ${actor.name}  |  👁 影子审查: ${shadow.name}`)
       resultMessages.push(systemMsg)
 
-      // 执行者先回答
       const actorReply = await callAI({
-        provider: actor.provider,
-        model: actor.model,
-        apiKey: actor.apiKey,
-        baseUrl: actor.baseUrl,
+        provider: actor.provider, model: actor.model, apiKey: actor.apiKey, baseUrl: actor.baseUrl,
         messages: historyMessages,
-        systemPrompt: cfg.actor_prompt || actor.systemPrompt || '请直接完成用户的任务，给出最好的答案。',
-        maxTokens: (modeConfig?.config as Record<string, number>)?.max_tokens_actor || 1000,
+        systemPrompt: buildSystemPrompt(actor.baseSystemPrompt, actorModePrompt),
+        maxTokens: (cfg.max_tokens_actor as number) || 1000,
       })
-
       const actorMsg = await saveMessage(session_id, 'ai', actor.id, actor.name, actor.avatar, actorReply, '执行者', { model: actor.model })
       resultMessages.push(actorMsg)
 
-      // 影子审查执行者的回答
-      const shadowPrompt = `${cfg.shadow_prompt || '你是审查员。请仔细审查以下回答，找出逻辑漏洞、潜在风险或可改进之处。'}\n\n【执行者的回答】\n${actorReply}`
-
+      const shadowFullPrompt = `${shadowModePrompt}\n\n【执行者的回答】\n${actorReply}`
       const shadowReply = await callAI({
-        provider: shadow.provider,
-        model: shadow.model,
-        apiKey: shadow.apiKey,
-        baseUrl: shadow.baseUrl,
+        provider: shadow.provider, model: shadow.model, apiKey: shadow.apiKey, baseUrl: shadow.baseUrl,
         messages: [{ role: 'user', content: `原始问题：${content}` }],
-        systemPrompt: shadowPrompt,
-        maxTokens: (modeConfig?.config as Record<string, number>)?.max_tokens_shadow || 600,
+        systemPrompt: buildSystemPrompt(shadow.baseSystemPrompt, shadowFullPrompt),
+        maxTokens: (cfg.max_tokens_shadow as number) || 600,
       })
-
       const shadowMsg = await saveMessage(session_id, 'ai', shadow.id, shadow.name, shadow.avatar, shadowReply, '影子审查', { model: shadow.model })
       resultMessages.push(shadowMsg)
 
+    // ==================== 主审官模式 ====================
     } else if (mode === 'judge') {
-      // 主审官模式：专家们分析，第一个 AI 做主审官裁决
-      const cfg = modeConfig?.config as Record<string, unknown> || {}
+      const judgeModePrompt = (cfg.judge_prompt as string) || '你是主审官，请综合以下专家意见，给出最终裁决和理由。'
       const dimensions = (cfg.expert_dimensions as string[]) || ['维度一', '维度二', '维度三']
       const judge = validAIs[0]
       const experts = validAIs.slice(1)
-      const actualExperts = experts.length > 0 ? experts : validAIs  // 没有足够 AI 时用同一批
+      const actualExperts = experts.length > 0 ? experts : validAIs
 
       const systemMsg = await saveMessage(session_id, 'system', null, 'system', null, `⚖️ 主审官模式 — 主审官: ${judge.name}，专家团: ${actualExperts.map((e) => e.name).join(', ')}`)
       resultMessages.push(systemMsg)
 
-      // 专家们各自分析（并行）
       const expertReplies = await Promise.allSettled(
-        actualExperts.slice(0, dimensions.length).map((ai, idx) =>
-          callAI({
-            provider: ai.provider,
-            model: ai.model,
-            apiKey: ai.apiKey,
-            baseUrl: ai.baseUrl,
+        actualExperts.slice(0, dimensions.length).map((ai, idx) => {
+          const expertModePrompt = (cfg[`expert_${idx + 1}_prompt`] as string)
+            || `你正在作为「${dimensions[idx] || `专家${idx + 1}`}」领域的专家参与讨论。请从 ${dimensions[idx]} 角度深入分析用户的问题，提供专业的分析报告。`
+          return callAI({
+            provider: ai.provider, model: ai.model, apiKey: ai.apiKey, baseUrl: ai.baseUrl,
             messages: [{ role: 'user', content }],
-            systemPrompt: `${ai.systemPrompt}\n\n你是「${dimensions[idx] || `专家${idx + 1}`}」领域的专家。请从 ${dimensions[idx]} 角度深入分析用户的问题，提供专业的分析报告。`,
+            systemPrompt: buildSystemPrompt(ai.baseSystemPrompt, expertModePrompt),
             maxTokens: (cfg.max_tokens_per_expert as number) || 800,
           })
-        )
+        })
       )
 
       let expertsReport = ''
@@ -412,42 +359,31 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
         expertsReport += `\n\n【${dimensions[i] || `专家${i + 1}`} 分析】(${ai.name}):\n${replyContent}`
       }
 
-      // 主审官综合裁决
-      const judgePrompt = `${cfg.judge_prompt || '你是主审官，请综合以下专家意见，给出最终裁决和理由。'}\n\n【原始问题】\n${content}${expertsReport}`
-
+      const judgeFullPrompt = `${judgeModePrompt}\n\n【原始问题】\n${content}${expertsReport}`
       const judgeReply = await callAI({
-        provider: judge.provider,
-        model: judge.model,
-        apiKey: judge.apiKey,
-        baseUrl: judge.baseUrl,
-        messages: [{ role: 'user', content: judgePrompt }],
-        systemPrompt: judge.systemPrompt,
+        provider: judge.provider, model: judge.model, apiKey: judge.apiKey, baseUrl: judge.baseUrl,
+        messages: [{ role: 'user', content: judgeFullPrompt }],
+        systemPrompt: buildSystemPrompt(judge.baseSystemPrompt, '你是最终裁决者，请整合所有专家意见，做出明确的最终判断和建议。'),
         maxTokens: (cfg.max_tokens_judge as number) || 1200,
       })
-
       const judgeMsg = await saveMessage(session_id, 'ai', judge.id, `${judge.name} (主审官)`, judge.avatar, judgeReply, '主审官·最终裁决', { model: judge.model })
       resultMessages.push(judgeMsg)
 
+    // ==================== 点名模式 ====================
     } else if (mode === 'rollcall') {
-      // 点名模式：先让一个 AI 判断需要哪些专家，再调用
-      const cfg = modeConfig?.config as Record<string, unknown> || {}
+      const selectorModePrompt = (cfg.selector_prompt as string) || '根据用户的问题，从专家库中选出最合适的1-3位专家（用逗号分隔编号），只返回编号列表，如 "1,3"。'
+      const expertReplyModePrompt = (cfg.expert_reply_prompt as string) || ''
+
       const selector = validAIs[0]
-
-      // 构建专家列表描述
       const expertList = validAIs.map((ai, i) => `${i + 1}. ${ai.name} (${ai.model})`).join('\n')
-
-      const selectPrompt = `${cfg.selector_prompt || '根据用户的问题，从专家库中选出最合适的1-3位专家（用逗号分隔编号），只返回编号列表，如 "1,3"。'}\n\n专家库:\n${expertList}\n\n用户问题: ${content}`
+      const selectPrompt = `${selectorModePrompt}\n\n专家库:\n${expertList}\n\n用户问题: ${content}`
 
       const selected = await callAI({
-        provider: selector.provider,
-        model: selector.model,
-        apiKey: selector.apiKey,
-        baseUrl: selector.baseUrl,
+        provider: selector.provider, model: selector.model, apiKey: selector.apiKey, baseUrl: selector.baseUrl,
         messages: [{ role: 'user', content: selectPrompt }],
         maxTokens: 50,
       })
 
-      // 解析选中的专家编号
       const indices = selected
         .match(/\d+/g)
         ?.map((n) => parseInt(n) - 1)
@@ -455,26 +391,124 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
         ?.slice(0, (cfg.max_experts as number) || 3) || [0]
 
       const selectedExperts = indices.map((i) => validAIs[i]).filter(Boolean)
-
-      const systemMsg = await saveMessage(
-        session_id, 'system', null, 'system', null,
-        `📋 点名模式 — 已调用: ${selectedExperts.map((e) => e.name).join(', ')}`
-      )
+      const systemMsg = await saveMessage(session_id, 'system', null, 'system', null, `📋 点名模式 — 已调用: ${selectedExperts.map((e) => e.name).join(', ')}`)
       resultMessages.push(systemMsg)
 
-      // 被点名的专家依次回答
       for (const ai of selectedExperts) {
         const reply = await callAI({
-          provider: ai.provider,
-          model: ai.model,
-          apiKey: ai.apiKey,
-          baseUrl: ai.baseUrl,
+          provider: ai.provider, model: ai.model, apiKey: ai.apiKey, baseUrl: ai.baseUrl,
           messages: historyMessages,
-          systemPrompt: ai.systemPrompt,
+          systemPrompt: buildSystemPrompt(ai.baseSystemPrompt, expertReplyModePrompt),
           maxTokens: (cfg.max_tokens as number) || 800,
         })
         const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, reply, '专家发言', { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model })
         resultMessages.push(msg)
+      }
+
+    // ==================== 自由讨论模式（discussion 或 discussion_mode: true 的自定义模式）====================
+    } else {
+      const isDiscussion = mode === 'discussion' || cfg.discussion_mode === true
+
+      if (isDiscussion) {
+        const maxRounds    = (cfg.max_rounds as number)    || 3
+        const maxSeconds   = (cfg.max_seconds as number)   || 0
+        const enableSummary = cfg.enable_summary !== false
+        const summaryAIIndex = (cfg.summary_ai_index as number) ?? 0
+
+        const discussionPrompt = (cfg.discussion_prompt as string)
+          || '你正在参与一场多AI自由讨论。请认真阅读前面所有发言，在此基础上发表你自己的观点、补充信息或对他人观点的看法。每次发言保持简洁，不要重复已有内容。'
+        const summaryPrompt = (cfg.summary_prompt as string)
+          || '请对以上所有AI的讨论进行简洁总结，列出主要观点、共识和分歧。'
+
+        const startMsg = await saveMessage(
+          session_id, 'system', null, 'system', null,
+          `💬 自由讨论开始 — 参与者: ${activeAIs.map(a => a.name).join(', ')} · 最多 ${maxRounds} 轮${maxSeconds > 0 ? ` · 限时 ${maxSeconds} 秒` : ''}`
+        )
+        resultMessages.push(startMsg)
+
+        // 讨论上下文：所有轮次发言，供每个AI参考
+        const discussionContext: Array<{ role: string; content: string }> = [
+          { role: 'user', content }
+        ]
+
+        const startTime = Date.now()
+        let stopped = false
+
+        for (let round = 1; round <= maxRounds && !stopped; round++) {
+          if (maxSeconds > 0 && (Date.now() - startTime) / 1000 >= maxSeconds) {
+            const timeoutMsg = await saveMessage(session_id, 'system', null, 'system', null, `⏱ 讨论时间到（${maxSeconds} 秒），讨论结束`)
+            resultMessages.push(timeoutMsg)
+            stopped = true
+            break
+          }
+
+          const roundMsg = await saveMessage(session_id, 'system', null, 'system', null, `── 第 ${round} 轮 ──`)
+          resultMessages.push(roundMsg)
+
+          // 本轮各AI串行发言，保证每个AI能看到本轮前面AI的发言
+          for (const ai of activeAIs) {
+            if (maxSeconds > 0 && (Date.now() - startTime) / 1000 >= maxSeconds) {
+              stopped = true
+              break
+            }
+
+            const reply = await callAI({
+              provider: ai.provider, model: ai.model, apiKey: ai.apiKey, baseUrl: ai.baseUrl,
+              messages: [...discussionContext],
+              systemPrompt: buildSystemPrompt(ai.baseSystemPrompt, discussionPrompt),
+              maxTokens: (cfg.max_tokens as number) || 600,
+              temperature: (cfg.temperature as number) || 0.8,
+            })
+
+            // 把本条发言加入上下文，后续AI能看到
+            discussionContext.push({ role: 'assistant', content: `[${ai.name}]: ${reply}` })
+
+            const msg = await saveMessage(
+              session_id, 'ai', ai.id, ai.name, ai.avatar, reply, `第${round}轮`,
+              { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model, discussion_round: round }
+            )
+            resultMessages.push(msg)
+          }
+        }
+
+        // 总结
+        if (enableSummary) {
+          const summaryAI = activeAIs[summaryAIIndex] || activeAIs[0]
+          const summaryReply = await callAI({
+            provider: summaryAI.provider, model: summaryAI.model, apiKey: summaryAI.apiKey, baseUrl: summaryAI.baseUrl,
+            messages: [...discussionContext, { role: 'user', content: summaryPrompt }],
+            systemPrompt: buildSystemPrompt(summaryAI.baseSystemPrompt, '你现在需要对刚才的多AI讨论做总结。'),
+            maxTokens: (cfg.max_tokens_summary as number) || 800,
+          })
+          const summaryMsg = await saveMessage(
+            session_id, 'ai', summaryAI.id, `${summaryAI.name} (总结)`, summaryAI.avatar,
+            summaryReply, '讨论总结', { model: summaryAI.model, is_summary: true }
+          )
+          resultMessages.push(summaryMsg)
+        }
+
+        const endMsg = await saveMessage(session_id, 'system', null, 'system', null, '✅ 讨论结束')
+        resultMessages.push(endMsg)
+
+      } else {
+        // 未知自定义模式：降级为普通模式，支持 default_prompt
+        const defaultModePrompt = (cfg.default_prompt as string) || ''
+        const replies = await Promise.allSettled(
+          activeAIs.map((ai) => callAI({
+            provider: ai.provider, model: ai.model, apiKey: ai.apiKey, baseUrl: ai.baseUrl,
+            messages: historyMessages,
+            systemPrompt: buildSystemPrompt(ai.baseSystemPrompt, defaultModePrompt),
+            maxTokens: (cfg.max_tokens as number) || 1500,
+            temperature: (cfg.temperature as number) || 0.7,
+          }))
+        )
+        for (let i = 0; i < activeAIs.length; i++) {
+          const ai = activeAIs[i]
+          const result = replies[i]
+          const replyContent = result.status === 'fulfilled' ? result.value : `❌ 调用失败: ${(result.reason as Error).message}`
+          const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, replyContent, undefined, { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model })
+          resultMessages.push(msg)
+        }
       }
     }
 
@@ -490,7 +524,7 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
     local_ai_calls: localAIs.length > 0 ? localAIs.map(ai => ({
       id: ai.id, name: ai.name, avatar: ai.avatar,
       model: ai.model, base_url: ai.baseUrl || 'http://localhost:11434',
-      system_prompt: ai.systemPrompt,
+      system_prompt: ai.baseSystemPrompt,
     })) : undefined
   })
 })
