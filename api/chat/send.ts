@@ -27,29 +27,56 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
   custom:    '',
 }
 
-// ---- 修复混元等模型的消息格式限制 ----
-// 问题：群聊模式下多个AI回复都是 assistant 角色，连续出现会报错
-// 解决：把连续的 assistant 消息合并成一条，确保严格交替
+// 判断是否是混元模型（通过 baseUrl 或 model 名称判断）
+function isHunyuanModel(baseUrl?: string, model?: string): boolean {
+  if (baseUrl && (baseUrl.includes('hunyuan') || baseUrl.includes('tokenhub.tencent') || baseUrl.includes('tencentmaa'))) return true
+  if (model && (model.includes('hunyuan') || model.includes('hy3') || model.startsWith('hy'))) return true
+  return false
+}
+
+// 修复连续同角色消息（混元要求严格交替）
 function normalizeMessages(messages: Array<{ role: string; content: string }>): Array<{ role: string; content: string }> {
   if (messages.length === 0) return messages
-
   const result: Array<{ role: string; content: string }> = []
-
   for (const msg of messages) {
     const last = result[result.length - 1]
     if (last && last.role === msg.role) {
-      // 同角色连续出现，合并内容
       last.content = `${last.content}\n\n${msg.content}`
     } else {
       result.push({ ...msg })
     }
   }
-
-  // 确保第一条是 user（混元要求以 user 开头）
+  // 确保以 user 开头
   if (result.length > 0 && result[0].role !== 'user') {
     result.shift()
   }
+  return result
+}
 
+// 为混元构建消息列表：把 system prompt 合并进第一条 user 消息，不用 system 角色
+function buildHunyuanMessages(
+  messages: Array<{ role: string; content: string }>,
+  systemPrompt?: string
+): Array<{ role: string; content: string }> {
+  const normalized = normalizeMessages(messages)
+
+  if (!systemPrompt || !systemPrompt.trim()) {
+    return normalized.length > 0 ? normalized : [{ role: 'user', content: '你好' }]
+  }
+
+  if (normalized.length === 0) {
+    // 没有历史消息，直接把 system prompt 作为 user 消息前缀
+    return [{ role: 'user', content: `${systemPrompt}\n\n请根据以上设定回复用户。` }]
+  }
+
+  // 把 system prompt 追加到第一条 user 消息前面
+  const result = [...normalized]
+  if (result[0].role === 'user') {
+    result[0] = {
+      role: 'user',
+      content: `${systemPrompt}\n\n---\n\n${result[0].content}`
+    }
+  }
   return result
 }
 
@@ -61,14 +88,12 @@ async function callAI(params: AICallParams): Promise<string> {
 
   if (!baseUrl) throw new Error(`未知提供商 ${provider}，请填写 API Base URL`)
 
-  // 对所有模型都做消息格式标准化，防止连续同角色消息
-  const normalizedMessages = normalizeMessages(messages)
-
-  const allMessages = systemPrompt
-    ? [{ role: 'system', content: systemPrompt }, ...normalizedMessages]
-    : normalizedMessages
-
+  // Gemini 格式
   if (provider === 'gemini') {
+    const normalizedMessages = normalizeMessages(messages)
+    const allMessages = systemPrompt
+      ? [{ role: 'system', content: systemPrompt }, ...normalizedMessages]
+      : normalizedMessages
     const url = `${baseUrl}/models/${model}:generateContent?key=${apiKey}`
     const contents = allMessages
       .filter((m) => m.role !== 'system')
@@ -87,6 +112,7 @@ async function callAI(params: AICallParams): Promise<string> {
     return data.candidates?.[0]?.content?.parts?.[0]?.text || ''
   }
 
+  // GLM JWT Token
   let authToken = apiKey || ''
   if (provider === 'glm' && apiKey && apiKey.includes('.')) {
     const [id, secret] = apiKey.split('.')
@@ -98,7 +124,12 @@ async function callAI(params: AICallParams): Promise<string> {
     authToken = `${header}.${payload}.${sig}`
   }
 
+  // Ollama
   if (provider === 'ollama') {
+    const normalizedMessages = normalizeMessages(messages)
+    const allMessages = systemPrompt
+      ? [{ role: 'system', content: systemPrompt }, ...normalizedMessages]
+      : normalizedMessages
     const ollamaUrl = `${baseUrl.replace('/v1', '')}/api/chat`
     const ollamaBody = { model, messages: allMessages, stream: false }
     const resp = await fetch(ollamaUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(ollamaBody) })
@@ -107,8 +138,23 @@ async function callAI(params: AICallParams): Promise<string> {
     return data.message?.content || ''
   }
 
+  // OpenAI 兼容格式
   const url = `${baseUrl}/chat/completions`
-  const body = { model, messages: allMessages, max_tokens: maxTokens, temperature }
+
+  let finalMessages: Array<{ role: string; content: string }>
+
+  if (isHunyuanModel(baseUrl, model)) {
+    // 混元：不支持 system 角色，把 system prompt 合并进第一条 user 消息
+    finalMessages = buildHunyuanMessages(messages, systemPrompt)
+  } else {
+    // 其他模型：正常处理
+    const normalizedMessages = normalizeMessages(messages)
+    finalMessages = systemPrompt
+      ? [{ role: 'system', content: systemPrompt }, ...normalizedMessages]
+      : normalizedMessages
+  }
+
+  const body = { model, messages: finalMessages, max_tokens: maxTokens, temperature }
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (authToken) headers['Authorization'] = `Bearer ${authToken}`
   const resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) })
@@ -405,8 +451,7 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
         const ai = activeAIs[i]
         const result = replies[i]
         const replyContent = result.status === 'fulfilled' ? result.value : `❌ 调用失败: ${(result.reason as Error).message}`
-        const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, replyContent, undefined, { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model })
-        resultMessages.push(msg)
+        resultMessages.push(await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, replyContent, undefined, { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model }))
       }
 
     } else if (mode === 'bidding') {
