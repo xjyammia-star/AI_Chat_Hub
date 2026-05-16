@@ -75,11 +75,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  // 所有模式统一走 SSE
   sendMessage: async (content) => {
     const { currentSession, activeMode, selectedAIIds } = get()
     if (!currentSession || !content.trim()) return
-
     set({ isSending: true })
     await handleSSESend(content, currentSession, activeMode, selectedAIIds, set, get)
   },
@@ -177,7 +175,7 @@ async function handleSSESend(
 
   const decoder = new TextDecoder()
   let buffer = ''
-  // 记录每个 AI 的思考中气泡 id，收到真实消息时替换
+  // 记录每个 AI 的思考中气泡 id
   const thinkingIds: Record<string, string> = {}
 
   try {
@@ -205,7 +203,7 @@ async function handleSSESend(
           const data = JSON.parse(dataStr)
 
           if (eventType === 'thinking') {
-            // 显示某个 AI 的思考中气泡
+            // 显示思考中气泡
             const thinkingId = `thinking-${data.ai_id}-${Date.now()}`
             thinkingIds[data.ai_id] = thinkingId
             const thinkingMsg: ChatMessage = {
@@ -221,8 +219,7 @@ async function handleSSESend(
             set((state: any) => ({ messages: [...state.messages, thinkingMsg] }))
 
           } else if (eventType === 'message') {
-            // 收到真实消息，替换对应的思考中气泡
-            // 通过 sender_id 匹配
+            // 收到真实消息，替换思考中气泡
             const thinkingId = data.sender_id ? thinkingIds[data.sender_id] : null
             if (thinkingId) delete thinkingIds[data.sender_id]
 
@@ -234,13 +231,23 @@ async function handleSSESend(
             })
 
           } else if (eventType === 'local_ai_calls') {
-            // 处理本地 Ollama AI
+            // 处理本地 Ollama AI（异步，不阻塞主流程）
             const localAICalls = Array.isArray(data) ? data : []
             if (localAICalls.length > 0) {
-              handleLocalAIs(localAICalls, currentSession, set, get)
+              // 不 await，让本地 AI 调用在后台进行
+              handleLocalAIs(localAICalls, currentSession, set, get).catch(console.error)
             }
 
           } else if (eventType === 'done') {
+            // 清理残留的思考中气泡（超时未回复的AI）
+            const remainingThinkingIds = Object.values(thinkingIds)
+            if (remainingThinkingIds.length > 0) {
+              set((state: any) => ({
+                messages: state.messages.filter(
+                  (m: ChatMessage) => !remainingThinkingIds.includes(m.id)
+                ),
+              }))
+            }
             set({ isSending: false })
             get().loadSessions()
           }
@@ -249,18 +256,22 @@ async function handleSSESend(
         }
       }
     }
+  } catch (e) {
+    // 流读取出错，只重置状态，不清除消息
+    console.error('SSE read error:', e)
   } finally {
     reader.releaseLock()
-    // 清理残留的思考中气泡，确保状态干净
+    // 【修复】finally 里只重置 isSending，不清除消息
+    // 之前这里过滤 thinking 消息会把真实消息也清掉
     set((state: any) => ({
       isSending: false,
+      // 只清理还残留的思考中气泡，保留所有真实消息
       messages: state.messages.filter((m: ChatMessage) => !m.metadata?.thinking),
     }))
-    get().loadSessions()
   }
 }
 
-// ---- 处理本地 Ollama AI（前端直接调用）----
+// ---- 处理本地 Ollama AI ----
 async function handleLocalAIs(
   localAICalls: any[],
   currentSession: ChatSession,
