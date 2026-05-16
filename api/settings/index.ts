@@ -43,9 +43,7 @@ export default requireAuth(async (req, res, authUser): Promise<any> => {
 
     if (req.method === 'DELETE') {
       const { id } = req.body
-      const [mode] = await sql`SELECT mode_key FROM chat_modes WHERE id = ${id}`
-      const builtinKeys = ['normal', 'judge', 'bidding', 'shadow', 'rollcall']
-      if (mode && builtinKeys.includes(mode.mode_key)) return res.status(400).json({ error: '内置模式不可删除' })
+      // 【修改】允许删除任何模式，包括内置模式，由用户自己决定
       await sql`DELETE FROM chat_modes WHERE id = ${id}`
       return res.json({ success: true })
     }
@@ -54,13 +52,10 @@ export default requireAuth(async (req, res, authUser): Promise<any> => {
   // ==================== PROFILE ====================
   if (type === 'profile') {
     if (req.method !== 'PUT') return res.status(405).json({ error: 'Method not allowed' })
-
     const { display_name, current_password, new_password } = req.body
-
     if (display_name !== undefined) {
       await sql`UPDATE users SET display_name = ${display_name}, updated_at = NOW() WHERE id = ${authUser.id}`
     }
-
     if (current_password && new_password) {
       if (new_password.length < 8) return res.status(400).json({ error: '新密码至少8位' })
       const [user] = await sql`SELECT password_hash FROM users WHERE id = ${authUser.id}`
@@ -69,7 +64,6 @@ export default requireAuth(async (req, res, authUser): Promise<any> => {
       const hash = await bcrypt.hash(new_password, 12)
       await sql`UPDATE users SET password_hash = ${hash}, updated_at = NOW() WHERE id = ${authUser.id}`
     }
-
     return res.json({ success: true })
   }
 
