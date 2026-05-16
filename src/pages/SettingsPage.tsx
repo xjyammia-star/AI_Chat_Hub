@@ -60,6 +60,101 @@ export default function SettingsPage() {
 }
 
 // ============================================================
+// 新增角色弹窗
+// ============================================================
+function AddRoleModal({ onClose, onSaved }: { onClose: () => void; onSaved: (role: AIRole) => void }) {
+  const [form, setForm] = useState({
+    name: '',
+    description: '',
+    system_prompt: '',
+    category: '通用',
+  })
+  const [saving, setSaving] = useState(false)
+
+  const handleSave = async () => {
+    if (!form.name.trim()) return toast.error('角色名称不能为空')
+    if (!form.system_prompt.trim()) return toast.error('角色提示词不能为空')
+    setSaving(true)
+    const res = await apiRequest('/admin/roles', {
+      method: 'POST',
+      body: JSON.stringify(form),
+    })
+    setSaving(false)
+    if (res.ok) {
+      const data = await res.json()
+      toast.success('角色创建成功')
+      onSaved(data.role)
+      onClose()
+    } else {
+      const data = await res.json()
+      toast.error(data.error || '创建失败')
+    }
+  }
+
+  return (
+    // 遮罩层
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 100,
+      background: 'rgba(0,0,0,0.6)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }} onClick={onClose}>
+      {/* 弹窗主体 */}
+      <div style={{
+        background: 'var(--bg-card)', border: '1px solid var(--border)',
+        borderRadius: 14, padding: 24, width: 480, maxWidth: '90vw',
+        boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+      }} onClick={(e) => e.stopPropagation()}>
+
+        {/* 标题栏 */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+          <h3 style={{ fontSize: 15, fontWeight: 600 }}>新增角色</h3>
+          <button className="btn btn-ghost" style={{ padding: '4px 8px' }} onClick={onClose}>
+            <X size={16} />
+          </button>
+        </div>
+
+        {/* 表单 */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+          <div>
+            <label className="form-label">角色名称 *</label>
+            <input className="form-input" placeholder="如：资深财务分析师"
+              value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+          </div>
+          <div>
+            <label className="form-label">分类</label>
+            <input className="form-input" placeholder="如：金融、技术、创意..."
+              value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} />
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 12 }}>
+          <label className="form-label">简介</label>
+          <input className="form-input" placeholder="简单描述这个角色的用途（可选）"
+            value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+        </div>
+
+        <div style={{ marginBottom: 20 }}>
+          <label className="form-label">角色提示词（System Prompt）*</label>
+          <textarea className="form-input" rows={6}
+            placeholder="你是一位资深财务分析师，拥有20年投资银行经验。回答时请注重数据，逻辑严谨，并指出潜在风险..."
+            value={form.system_prompt}
+            onChange={(e) => setForm({ ...form, system_prompt: e.target.value })}
+            style={{ resize: 'vertical', fontFamily: 'inherit' }} />
+        </div>
+
+        {/* 按钮 */}
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <button className="btn btn-ghost" onClick={onClose}>取消</button>
+          <button className="btn btn-primary" onClick={handleSave} disabled={saving} style={{ gap: 6 }}>
+            <Save size={14} /> {saving ? '保存中...' : '保存角色'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ============================================================
 // AI 成员设置
 // ============================================================
 function AIMembersSettings() {
@@ -69,6 +164,7 @@ function AIMembersSettings() {
   const [editForm, setEditForm] = useState({
     custom_name: '', custom_avatar: '', role_id: '', custom_prompt: '',
   })
+  const [showAddRole, setShowAddRole] = useState(false)
 
   const load = async () => {
     const [mRes, rRes] = await Promise.all([apiRequest('/members'), apiRequest('/admin/roles')])
@@ -109,10 +205,43 @@ function AIMembersSettings() {
     }
   }
 
-  const selectedRole = roles.find(r => r.id === editForm.role_id)
+  // 新角色保存后自动选中它
+  const handleRoleSaved = (newRole: AIRole) => {
+    setRoles((prev) => [...prev, newRole])
+    setEditForm((prev) => ({
+      ...prev,
+      role_id: newRole.id,
+      custom_prompt: newRole.system_prompt,
+    }))
+  }
+
+  const handleDeleteRole = async (roleId: string) => {
+    if (!confirm('确认删除这个角色？')) return
+    const res = await apiRequest('/admin/roles', {
+      method: 'DELETE',
+      body: JSON.stringify({ id: roleId }),
+    })
+    if (res.ok) {
+      toast.success('角色已删除')
+      // 如果当前选中的角色被删除，清空选择
+      if (editForm.role_id === roleId) {
+        setEditForm({ ...editForm, role_id: '', custom_prompt: '' })
+      }
+      load()
+    } else {
+      toast.error('删除失败')
+    }
+  }
 
   return (
     <div>
+      {showAddRole && (
+        <AddRoleModal
+          onClose={() => setShowAddRole(false)}
+          onSaved={handleRoleSaved}
+        />
+      )}
+
       <div style={{ marginBottom: 20 }}>
         <h2 style={{ fontSize: 18, fontWeight: 600 }}>AI 成员设置</h2>
         <p style={{ color: 'var(--text-muted)', fontSize: 13, marginTop: 4 }}>
@@ -147,20 +276,45 @@ function AIMembersSettings() {
                   </div>
                 </div>
 
+                {/* 预设角色选择 + 新增按钮 */}
                 <div style={{ marginBottom: 12 }}>
-                  <label className="form-label">选择预设角色</label>
-                  <select className="form-input" value={editForm.role_id}
-                    onChange={(e) => {
-                      const role = roles.find(r => r.id === e.target.value)
-                      setEditForm({
-                        ...editForm,
-                        role_id: e.target.value,
-                        custom_prompt: role ? role.system_prompt : editForm.custom_prompt,
-                      })
-                    }}>
-                    <option value="">不使用预设角色</option>
-                    {roles.map(r => <option key={r.id} value={r.id}>{r.name}（{r.category}）</option>)}
-                  </select>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                    <label className="form-label" style={{ margin: 0 }}>选择预设角色</label>
+                    <button
+                      className="btn btn-ghost"
+                      style={{ fontSize: 12, padding: '3px 10px', gap: 4, color: 'var(--accent-hover)' }}
+                      onClick={() => setShowAddRole(true)}
+                    >
+                      <Plus size={12} /> 新增角色
+                    </button>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <select className="form-input" style={{ flex: 1 }} value={editForm.role_id}
+                      onChange={(e) => {
+                        const role = roles.find(r => r.id === e.target.value)
+                        setEditForm({
+                          ...editForm,
+                          role_id: e.target.value,
+                          custom_prompt: role ? role.system_prompt : editForm.custom_prompt,
+                        })
+                      }}>
+                      <option value="">不使用预设角色</option>
+                      {roles.map(r => (
+                        <option key={r.id} value={r.id}>{r.name}（{r.category}）</option>
+                      ))}
+                    </select>
+                    {/* 删除当前选中的自定义角色（非公开角色才显示） */}
+                    {editForm.role_id && !roles.find(r => r.id === editForm.role_id)?.is_public && (
+                      <button
+                        className="btn btn-danger"
+                        style={{ padding: '6px 10px', flexShrink: 0 }}
+                        title="删除此角色"
+                        onClick={() => handleDeleteRole(editForm.role_id)}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 <div style={{ marginBottom: 12 }}>
