@@ -209,7 +209,6 @@ async function saveMessage(
   return msg
 }
 
-// SSE 工具
 function sseWrite(res: any, event: string, data: unknown) {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
 }
@@ -234,8 +233,9 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
   const [modeConfig] = await sql`SELECT * FROM chat_modes WHERE mode_key = ${mode} AND is_enabled = true`
   const cfg = (modeConfig?.config as Record<string, unknown>) || {}
 
+  // ---- 取历史消息，AI 回复加上说话人标注，防止角色混淆 ----
   const history = await sql`
-    SELECT sender_type, content FROM chat_messages
+    SELECT sender_type, sender_name, content FROM chat_messages
     WHERE session_id = ${session_id}
       AND sender_type IN ('user', 'ai')
       AND content NOT LIKE '%调用失败%'
@@ -244,7 +244,10 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
   `
   const historyMessages = history.reverse().map((m: Record<string, string>) => ({
     role: m.sender_type === 'user' ? 'user' : 'assistant',
-    content: m.content,
+    // AI 的回复加上 [名字]: 前缀，让每个 AI 知道哪些话是谁说的
+    content: m.sender_type === 'user'
+      ? m.content
+      : `[${m.sender_name}]: ${m.content}`,
   }))
 
   let aiConfigs
@@ -287,7 +290,6 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
     activeAIs = m.length > 0 ? m : []
   }
 
-  // 所有响应统一走 SSE
   sseHeaders(res)
 
   const userMsg = await saveMessage(session_id, 'user', authUser.id, '我', null, content)
@@ -317,12 +319,9 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
 
     // ==================== 普通模式：并行，谁先完成谁先推送 ====================
     if (mode === 'normal') {
-      // 先推送所有 AI 的 thinking 状态
       for (const ai of activeAIs) {
         sseWrite(res, 'thinking', { ai_id: ai.id, ai_name: ai.name, ai_avatar: ai.avatar })
       }
-
-      // 并行调用，各自完成各自推送
       await Promise.allSettled(
         activeAIs.map(async (ai) => {
           try {
@@ -350,11 +349,9 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
       const systemMsg = await saveMessage(session_id, 'system', null, 'system', null,
         `🏆 竞标模式开始 — ${validAIs.length} 个 AI 同时提交方案`)
       sseWrite(res, 'message', systemMsg)
-
       for (const ai of activeAIs) {
         sseWrite(res, 'thinking', { ai_id: ai.id, ai_name: ai.name, ai_avatar: ai.avatar })
       }
-
       await Promise.allSettled(
         activeAIs.map(async (ai) => {
           try {
@@ -375,21 +372,18 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
           }
         })
       )
-
       const endMsg = await saveMessage(session_id, 'system', null, 'system', null, '✅ 所有方案已提交，请选出你最满意的方案')
       sseWrite(res, 'message', endMsg)
 
-    // ==================== 影子模式：串行（执行者先，影子后）====================
+    // ==================== 影子模式：串行 ====================
     } else if (mode === 'shadow') {
       const actorModePrompt = (cfg.actor_prompt as string) || '请直接完成用户的任务，给出最好的答案。'
       const shadowModePrompt = (cfg.shadow_prompt as string) || '你是审查员。请仔细审查以下回答，找出逻辑漏洞、潜在风险或可改进之处。'
       const actor = validAIs[0]
       const shadow = validAIs[1] || validAIs[0]
-
       const systemMsg = await saveMessage(session_id, 'system', null, 'system', null,
         `👤 执行者: ${actor.name}  |  👁 影子审查: ${shadow.name}`)
       sseWrite(res, 'message', systemMsg)
-
       sseWrite(res, 'thinking', { ai_id: actor.id, ai_name: actor.name, ai_avatar: actor.avatar })
       const actorReply = await callAI({
         provider: actor.provider, model: actor.model, apiKey: actor.apiKey, baseUrl: actor.baseUrl,
@@ -399,7 +393,6 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
       const actorMsg = await saveMessage(session_id, 'ai', actor.id, actor.name, actor.avatar, actorReply, '执行者',
         { model: actor.model })
       sseWrite(res, 'message', actorMsg)
-
       sseWrite(res, 'thinking', { ai_id: shadow.id, ai_name: shadow.name, ai_avatar: shadow.avatar })
       const shadowReply = await callAI({
         provider: shadow.provider, model: shadow.model, apiKey: shadow.apiKey, baseUrl: shadow.baseUrl,
@@ -418,16 +411,12 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
       const judge = validAIs[0]
       const experts = validAIs.slice(1)
       const actualExperts = experts.length > 0 ? experts : validAIs
-
       const systemMsg = await saveMessage(session_id, 'system', null, 'system', null,
         `⚖️ 主审官模式 — 主审官: ${judge.name}，专家团: ${actualExperts.map((e) => e.name).join(', ')}`)
       sseWrite(res, 'message', systemMsg)
-
       for (const ai of actualExperts.slice(0, dimensions.length)) {
         sseWrite(res, 'thinking', { ai_id: ai.id, ai_name: ai.name, ai_avatar: ai.avatar })
       }
-
-      // 专家并行，谁先完成谁先推送
       const expertResults: Record<string, string> = {}
       await Promise.allSettled(
         actualExperts.slice(0, dimensions.length).map(async (ai, idx) => {
@@ -453,12 +442,9 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
           }
         })
       )
-
-      // 主审官汇总裁决
       const expertsReport = actualExperts.slice(0, dimensions.length)
         .map((ai, i) => `\n\n【${dimensions[i] || `专家${i + 1}`} 分析】(${ai.name}):\n${expertResults[ai.id] || '无'}`)
         .join('')
-
       sseWrite(res, 'thinking', { ai_id: judge.id, ai_name: judge.name, ai_avatar: judge.avatar })
       const judgeReply = await callAI({
         provider: judge.provider, model: judge.model, apiKey: judge.apiKey, baseUrl: judge.baseUrl,
@@ -470,34 +456,28 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
         judgeReply, '主审官·最终裁决', { model: judge.model })
       sseWrite(res, 'message', judgeMsg)
 
-    // ==================== 点名模式：调度员选人，被点名者并行 ====================
+    // ==================== 点名模式：被点名者并行 ====================
     } else if (mode === 'rollcall') {
       const selectorModePrompt = (cfg.selector_prompt as string) || '根据用户的问题，从专家库中选出最合适的1-3位专家（用逗号分隔编号），只返回编号列表，如 "1,3"。'
       const expertReplyModePrompt = (cfg.expert_reply_prompt as string) || ''
       const selector = validAIs[0]
       const expertList = validAIs.map((ai, i) => `${i + 1}. ${ai.name} (${ai.model})`).join('\n')
-
       const selected = await callAI({
         provider: selector.provider, model: selector.model, apiKey: selector.apiKey, baseUrl: selector.baseUrl,
         messages: [{ role: 'user', content: `${selectorModePrompt}\n\n专家库:\n${expertList}\n\n用户问题: ${content}` }],
         maxTokens: 50,
       })
-
       const indices = selected.match(/\d+/g)
         ?.map((n) => parseInt(n) - 1)
         ?.filter((i) => i >= 0 && i < validAIs.length)
         ?.slice(0, (cfg.max_experts as number) || 3) || [0]
       const selectedExperts = indices.map((i) => validAIs[i]).filter(Boolean)
-
       const systemMsg = await saveMessage(session_id, 'system', null, 'system', null,
         `📋 点名模式 — 已调用: ${selectedExperts.map((e) => e.name).join(', ')}`)
       sseWrite(res, 'message', systemMsg)
-
       for (const ai of selectedExperts) {
         sseWrite(res, 'thinking', { ai_id: ai.id, ai_name: ai.name, ai_avatar: ai.avatar })
       }
-
-      // 被点名的专家并行回答
       await Promise.allSettled(
         selectedExperts.map(async (ai) => {
           try {
@@ -528,15 +508,12 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
         || '你正在参与一场多AI自由讨论。请认真阅读前面所有发言，在此基础上发表你自己的观点、补充信息或对他人观点的看法。每次发言保持简洁，不要重复已有内容。'
       const summaryPrompt = (cfg.summary_prompt as string)
         || '请对以上所有AI的讨论进行简洁总结，列出主要观点、共识和分歧。'
-
       const startMsg = await saveMessage(session_id, 'system', null, 'system', null,
         `💬 自由讨论开始 — 参与者: ${activeAIs.map(a => a.name).join(', ')} · 最多 ${maxRounds} 轮${maxSeconds > 0 ? ` · 限时 ${maxSeconds} 秒` : ''}`)
       sseWrite(res, 'message', startMsg)
-
       const discussionContext: Array<{ role: string; content: string }> = [{ role: 'user', content }]
       const startTime = Date.now()
       let stopped = false
-
       for (let round = 1; round <= maxRounds && !stopped; round++) {
         if (maxSeconds > 0 && (Date.now() - startTime) / 1000 >= maxSeconds) {
           const timeoutMsg = await saveMessage(session_id, 'system', null, 'system', null,
@@ -545,10 +522,8 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
           stopped = true
           break
         }
-
         const roundMsg = await saveMessage(session_id, 'system', null, 'system', null, `── 第 ${round} 轮 ──`)
         sseWrite(res, 'message', roundMsg)
-
         for (const ai of activeAIs) {
           if (maxSeconds > 0 && (Date.now() - startTime) / 1000 >= maxSeconds) { stopped = true; break }
           sseWrite(res, 'thinking', { ai_id: ai.id, ai_name: ai.name, ai_avatar: ai.avatar })
@@ -571,7 +546,6 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
           }
         }
       }
-
       if (enableSummary) {
         const summaryAI = (summaryAIId ? activeAIs.find(ai => ai.id === summaryAIId) : null) || activeAIs[0]
         sseWrite(res, 'thinking', { ai_id: summaryAI.id, ai_name: summaryAI.name, ai_avatar: summaryAI.avatar })
@@ -591,18 +565,15 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
           sseWrite(res, 'message', msg)
         }
       }
-
       const endMsg = await saveMessage(session_id, 'system', null, 'system', null, '✅ 讨论结束')
       sseWrite(res, 'message', endMsg)
 
     // ==================== 自定义模式：并行，谁先完成谁先推送 ====================
     } else {
       const defaultModePrompt = (cfg.default_prompt as string) || ''
-
       for (const ai of activeAIs) {
         sseWrite(res, 'thinking', { ai_id: ai.id, ai_name: ai.name, ai_avatar: ai.avatar })
       }
-
       await Promise.allSettled(
         activeAIs.map(async (ai) => {
           try {
@@ -625,7 +596,6 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
       )
     }
 
-    // 本地 AI 信息（前端自行调用）
     if (localAIs.length > 0) {
       sseWrite(res, 'local_ai_calls', localAIs.map(ai => ({
         id: ai.id, name: ai.name, avatar: ai.avatar,
