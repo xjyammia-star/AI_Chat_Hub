@@ -29,7 +29,7 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
 
 // 判断是否是混元模型（通过 baseUrl 或 model 名称判断）
 function isHunyuanModel(baseUrl?: string, model?: string): boolean {
-  if (baseUrl && (baseUrl.includes('hunyuan') || baseUrl.includes('tokenhub.tencent') || baseUrl.includes('tencentmaa'))) return true
+  if (baseUrl && (baseUrl.includes('hunyuan') || baseUrl.includes('tokenhub') || baseUrl.includes('tencentmaa') || baseUrl.includes('tencent'))) return true
   if (model && (model.includes('hunyuan') || model.includes('hy3') || model.startsWith('hy'))) return true
   return false
 }
