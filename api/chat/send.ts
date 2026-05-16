@@ -27,6 +27,32 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
   custom:    '',
 }
 
+// ---- 修复混元等模型的消息格式限制 ----
+// 问题：群聊模式下多个AI回复都是 assistant 角色，连续出现会报错
+// 解决：把连续的 assistant 消息合并成一条，确保严格交替
+function normalizeMessages(messages: Array<{ role: string; content: string }>): Array<{ role: string; content: string }> {
+  if (messages.length === 0) return messages
+
+  const result: Array<{ role: string; content: string }> = []
+
+  for (const msg of messages) {
+    const last = result[result.length - 1]
+    if (last && last.role === msg.role) {
+      // 同角色连续出现，合并内容
+      last.content = `${last.content}\n\n${msg.content}`
+    } else {
+      result.push({ ...msg })
+    }
+  }
+
+  // 确保第一条是 user（混元要求以 user 开头）
+  if (result.length > 0 && result[0].role !== 'user') {
+    result.shift()
+  }
+
+  return result
+}
+
 async function callAI(params: AICallParams): Promise<string> {
   const { provider, model, apiKey, messages, systemPrompt, maxTokens = 1500, temperature = 0.7 } = params
   const baseUrl = (params.baseUrl && params.baseUrl !== 'null' && params.baseUrl.trim() !== '')
@@ -35,9 +61,12 @@ async function callAI(params: AICallParams): Promise<string> {
 
   if (!baseUrl) throw new Error(`未知提供商 ${provider}，请填写 API Base URL`)
 
+  // 对所有模型都做消息格式标准化，防止连续同角色消息
+  const normalizedMessages = normalizeMessages(messages)
+
   const allMessages = systemPrompt
-    ? [{ role: 'system', content: systemPrompt }, ...messages]
-    : messages
+    ? [{ role: 'system', content: systemPrompt }, ...normalizedMessages]
+    : normalizedMessages
 
   if (provider === 'gemini') {
     const url = `${baseUrl}/models/${model}:generateContent?key=${apiKey}`
@@ -157,7 +186,6 @@ async function saveMessage(
   return msg
 }
 
-// SSE 工具函数
 function sseWrite(res: any, event: string, data: unknown) {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
 }
@@ -171,12 +199,10 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
   const [session] = await sql`SELECT * FROM chat_sessions WHERE id = ${session_id} AND user_id = ${authUser.id}`
   if (!session) { res.status(404).json({ error: '会话不存在' }); return }
 
-  // 判断是否需要流式输出（讨论模式才用 SSE，其他模式保持原来的 JSON 响应）
   const [modeConfig] = await sql`SELECT * FROM chat_modes WHERE mode_key = ${mode} AND is_enabled = true`
   const cfg = (modeConfig?.config as Record<string, unknown>) || {}
   const isDiscussion = mode === 'discussion' || cfg.discussion_mode === true
 
-  // 获取历史消息
   const history = await sql`
     SELECT sender_type, content FROM chat_messages
     WHERE session_id = ${session_id} AND sender_type != 'system'
@@ -187,7 +213,6 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
     content: m.content,
   }))
 
-  // 获取 AI 配置
   let aiConfigs
   if (selected_ai_ids && selected_ai_ids.length > 0) {
     aiConfigs = await Promise.all(
@@ -229,7 +254,6 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
     activeAIs = m.length > 0 ? m : []
   }
 
-  // 保存用户消息
   const userMsg = await saveMessage(session_id, 'user', authUser.id, '我', null, content)
 
   if (activeLocalAIs.length > 0 && activeAIs.length === 0) {
@@ -252,22 +276,19 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
 
   // ==================== 讨论模式：SSE 流式输出 ====================
   if (isDiscussion) {
-    // 设置 SSE 响应头
     res.setHeader('Content-Type', 'text/event-stream')
     res.setHeader('Cache-Control', 'no-cache')
     res.setHeader('Connection', 'keep-alive')
     res.setHeader('X-Accel-Buffering', 'no')
     res.flushHeaders()
 
-    // 先推送用户消息
     sseWrite(res, 'message', userMsg)
 
     try {
-      const maxRounds      = (cfg.max_rounds as number)    || 3
-      const maxSeconds     = (cfg.max_seconds as number)   || 0
-      const enableSummary  = cfg.enable_summary !== false
-      // 【修复】summary_ai_id 存 AI 的 ID，不再用下标
-      const summaryAIId    = (cfg.summary_ai_id as string) || null
+      const maxRounds     = (cfg.max_rounds as number)    || 3
+      const maxSeconds    = (cfg.max_seconds as number)   || 0
+      const enableSummary = cfg.enable_summary !== false
+      const summaryAIId   = (cfg.summary_ai_id as string) || null
 
       const discussionPrompt = (cfg.discussion_prompt as string)
         || '你正在参与一场多AI自由讨论。请认真阅读前面所有发言，在此基础上发表你自己的观点、补充信息或对他人观点的看法。每次发言保持简洁，不要重复已有内容。'
@@ -298,14 +319,12 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
         const roundMsg = await saveMessage(session_id, 'system', null, 'system', null, `── 第 ${round} 轮 ──`)
         sseWrite(res, 'message', roundMsg)
 
-        // 串行发言：每个AI说完立刻推送，下一个AI才开始
         for (const ai of activeAIs) {
           if (maxSeconds > 0 && (Date.now() - startTime) / 1000 >= maxSeconds) {
             stopped = true
             break
           }
 
-          // 推送"思考中"占位
           sseWrite(res, 'thinking', { ai_id: ai.id, ai_name: ai.name, ai_avatar: ai.avatar })
 
           try {
@@ -324,7 +343,6 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
               session_id, 'ai', ai.id, ai.name, ai.avatar, reply, `第${round}轮`,
               { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model, discussion_round: round }
             )
-            // 立刻推送这条消息给前端
             sseWrite(res, 'message', msg)
           } catch (err) {
             const errMsg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, `❌ 调用失败: ${(err as Error).message}`, `第${round}轮`, { model: ai.model })
@@ -333,12 +351,9 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
         }
       }
 
-      // 总结：用 summary_ai_id 找指定的AI，找不到则用第一个
       if (enableSummary) {
         const summaryAI = (summaryAIId ? activeAIs.find(ai => ai.id === summaryAIId) : null) || activeAIs[0]
-
         sseWrite(res, 'thinking', { ai_id: summaryAI.id, ai_name: summaryAI.name, ai_avatar: summaryAI.avatar })
-
         try {
           const summaryReply = await callAI({
             provider: summaryAI.provider, model: summaryAI.model,
@@ -373,7 +388,7 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
     return
   }
 
-  // ==================== 其他模式：保持原来的 JSON 响应 ====================
+  // ==================== 其他模式：JSON 响应 ====================
   const resultMessages: unknown[] = [userMsg]
 
   try {
@@ -396,8 +411,7 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
 
     } else if (mode === 'bidding') {
       const biddingModePrompt = (cfg.bidding_prompt as string) || '请针对用户的问题提交你的最佳方案。要有创意，要具体，要有说服力。'
-      const systemMsg = await saveMessage(session_id, 'system', null, 'system', null, `🏆 竞标模式开始 — ${validAIs.length} 个 AI 同时提交方案`)
-      resultMessages.push(systemMsg)
+      resultMessages.push(await saveMessage(session_id, 'system', null, 'system', null, `🏆 竞标模式开始 — ${validAIs.length} 个 AI 同时提交方案`))
       const replies = await Promise.allSettled(
         validAIs.map((ai) => callAI({
           provider: ai.provider, model: ai.model, apiKey: ai.apiKey, baseUrl: ai.baseUrl,
@@ -411,8 +425,7 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
         const ai = activeAIs[i]
         const result = replies[i]
         const replyContent = result.status === 'fulfilled' ? result.value : `❌ 调用失败`
-        const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, replyContent, '竞标方案', { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model })
-        resultMessages.push(msg)
+        resultMessages.push(await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, replyContent, '竞标方案', { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model }))
       }
       resultMessages.push(await saveMessage(session_id, 'system', null, 'system', null, '✅ 所有方案已提交，请选出你最满意的方案'))
 
@@ -494,7 +507,6 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
       }
 
     } else {
-      // 未知自定义模式降级为普通
       const defaultModePrompt = (cfg.default_prompt as string) || ''
       const replies = await Promise.allSettled(
         activeAIs.map((ai) => callAI({
