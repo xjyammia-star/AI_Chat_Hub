@@ -42,19 +42,22 @@ function isHunyuanModel(baseUrl?: string, model?: string): boolean {
   return false
 }
 
-function normalizeMessages(messages: Array<{ role: string; content: string }>): Array<{ role: string; content: string }> {
+// 修复：只合并连续同角色，不删除任何消息
+// 之前的版本会在第一条不是 user 时 shift() 导致消息丢失
+function normalizeMessages(
+  messages: Array<{ role: string; content: string }>
+): Array<{ role: string; content: string }> {
   if (messages.length === 0) return messages
+
   const result: Array<{ role: string; content: string }> = []
   for (const msg of messages) {
     const last = result[result.length - 1]
     if (last && last.role === msg.role) {
+      // 合并连续同角色消息
       last.content = `${last.content}\n\n${msg.content}`
     } else {
-      result.push({ ...msg })
+      result.push({ role: msg.role, content: msg.content })
     }
-  }
-  if (result.length > 0 && result[0].role !== 'user') {
-    result.shift()
   }
   return result
 }
@@ -67,31 +70,45 @@ async function callAI(params: AICallParams): Promise<string> {
 
   if (!baseUrl) throw new Error(`未知提供商 ${provider}，请填写 API Base URL`)
 
-  // Gemini
+  const normalizedMessages = normalizeMessages(messages)
+
+  // ---- Gemini ----
   if (provider === 'gemini') {
-    const normalizedMessages = normalizeMessages(messages)
-    const allMessages = systemPrompt
-      ? [{ role: 'system', content: systemPrompt }, ...normalizedMessages]
-      : normalizedMessages
     const url = `${baseUrl}/models/${model}:generateContent?key=${apiKey}`
-    const contents = allMessages
-      .filter((m) => m.role !== 'system')
-      .map((m) => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] }))
-    const systemInstruction = allMessages.find((m) => m.role === 'system')
+
+    // Gemini 不支持 system role，单独处理
+    const userAssistantMessages = normalizedMessages.filter((m) => m.role !== 'system')
+
+    // 如果没有任何 user/assistant 消息，至少加一条占位
+    if (userAssistantMessages.length === 0) {
+      userAssistantMessages.push({ role: 'user', content: '你好' })
+    }
+
+    const contents = userAssistantMessages.map((m) => ({
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: m.content }],
+    }))
+
     const body: Record<string, unknown> = {
       contents,
       generationConfig: { maxOutputTokens: maxTokens, temperature },
     }
-    if (systemInstruction) {
-      body.systemInstruction = { parts: [{ text: systemInstruction.content }] }
+
+    if (systemPrompt) {
+      body.systemInstruction = { parts: [{ text: systemPrompt }] }
     }
-    const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
     const data = await resp.json()
     if (!resp.ok) throw new Error(data.error?.message || 'Gemini API error')
     return data.candidates?.[0]?.content?.parts?.[0]?.text || ''
   }
 
-  // GLM JWT
+  // ---- GLM JWT ----
   let authToken = apiKey || ''
   if (provider === 'glm' && apiKey && apiKey.includes('.')) {
     const [id, secret] = apiKey.split('.')
@@ -103,30 +120,30 @@ async function callAI(params: AICallParams): Promise<string> {
     authToken = `${header}.${payload}.${sig}`
   }
 
-  // Ollama
+  // ---- Ollama ----
   if (provider === 'ollama') {
-    const normalizedMessages = normalizeMessages(messages)
     const allMessages = systemPrompt
       ? [{ role: 'system', content: systemPrompt }, ...normalizedMessages]
       : normalizedMessages
     const ollamaUrl = `${baseUrl.replace('/v1', '')}/api/chat`
-    const ollamaBody = { model, messages: allMessages, stream: false }
-    const resp = await fetch(ollamaUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(ollamaBody) })
+    const resp = await fetch(ollamaUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, messages: allMessages, stream: false }),
+    })
     if (!resp.ok) throw new Error(`Ollama error ${resp.status}`)
     const data = await resp.json()
     return data.message?.content || ''
   }
 
-  // OpenAI 兼容格式
+  // ---- OpenAI 兼容格式（doubao / GLM火山版 / deepseek / 混元 / openai 等）----
   const url = `${baseUrl}/chat/completions`
   const hunyuan = isHunyuanModel(baseUrl, model)
 
-  const normalizedMessages = normalizeMessages(messages)
   const finalMessages = systemPrompt
     ? [{ role: 'system', content: systemPrompt }, ...normalizedMessages]
     : normalizedMessages
 
-  // 构建请求 body
   const body: Record<string, unknown> = {
     model,
     messages: finalMessages,
@@ -134,7 +151,7 @@ async function callAI(params: AICallParams): Promise<string> {
     temperature,
   }
 
-  // 混元专属：禁用工具调用，避免误解析 system prompt 内容为 tool call
+  // 混元专属：禁用工具自动调用，避免误解析 system prompt
   if (hunyuan) {
     body.tool_choice = 'none'
   }
@@ -145,8 +162,7 @@ async function callAI(params: AICallParams): Promise<string> {
   const resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) })
   const data = await resp.json()
   if (!resp.ok) {
-    console.error('[AI Error] provider:', provider, 'model:', model, 'baseUrl:', baseUrl)
-    console.error('[AI Error] response:', JSON.stringify(data))
+    console.error('[AI Error]', provider, model, JSON.stringify(data).slice(0, 300))
     throw new Error(data.error?.message || `API error ${resp.status}`)
   }
   return data.choices?.[0]?.message?.content || ''
@@ -240,7 +256,10 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
 
   const history = await sql`
     SELECT sender_type, content FROM chat_messages
-    WHERE session_id = ${session_id} AND sender_type != 'system'
+    WHERE session_id = ${session_id}
+      AND sender_type IN ('user', 'ai')
+      AND content NOT LIKE '%调用失败%'
+      AND content NOT LIKE '%❌%'
     ORDER BY created_at DESC LIMIT 20
   `
   const historyMessages = history.reverse().map((m: Record<string, string>) => ({
@@ -380,7 +399,8 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
             )
             sseWrite(res, 'message', msg)
           } catch (err) {
-            const errMsg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, `❌ 调用失败: ${(err as Error).message}`, `第${round}轮`, { model: ai.model })
+            const errMsg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar,
+              `❌ 调用失败: ${(err as Error).message}`, `第${round}轮`, { model: ai.model })
             sseWrite(res, 'message', errMsg)
           }
         }
@@ -403,7 +423,8 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
           )
           sseWrite(res, 'message', summaryMsg)
         } catch (err) {
-          const errMsg = await saveMessage(session_id, 'system', null, 'system', null, `❌ 总结生成失败: ${(err as Error).message}`)
+          const errMsg = await saveMessage(session_id, 'system', null, 'system', null,
+            `❌ 总结生成失败: ${(err as Error).message}`)
           sseWrite(res, 'message', errMsg)
         }
       }
@@ -414,7 +435,8 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
 
     } catch (err) {
       console.error('Discussion error:', err)
-      const errMsg = await saveMessage(session_id, 'system', null, 'system', null, `❌ 发生错误: ${(err as Error).message}`)
+      const errMsg = await saveMessage(session_id, 'system', null, 'system', null,
+        `❌ 发生错误: ${(err as Error).message}`)
       sseWrite(res, 'message', errMsg)
       sseWrite(res, 'done', { session_id })
     }
@@ -439,13 +461,17 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
       for (let i = 0; i < activeAIs.length; i++) {
         const ai = activeAIs[i]
         const result = replies[i]
-        const replyContent = result.status === 'fulfilled' ? result.value : `❌ 调用失败: ${(result.reason as Error).message}`
-        resultMessages.push(await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, replyContent, undefined, { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model }))
+        const replyContent = result.status === 'fulfilled'
+          ? result.value
+          : `❌ 调用失败: ${(result.reason as Error).message}`
+        resultMessages.push(await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, replyContent, undefined,
+          { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model }))
       }
 
     } else if (mode === 'bidding') {
       const biddingModePrompt = (cfg.bidding_prompt as string) || '请针对用户的问题提交你的最佳方案。要有创意，要具体，要有说服力。'
-      resultMessages.push(await saveMessage(session_id, 'system', null, 'system', null, `🏆 竞标模式开始 — ${validAIs.length} 个 AI 同时提交方案`))
+      resultMessages.push(await saveMessage(session_id, 'system', null, 'system', null,
+        `🏆 竞标模式开始 — ${validAIs.length} 个 AI 同时提交方案`))
       const replies = await Promise.allSettled(
         validAIs.map((ai) => callAI({
           provider: ai.provider, model: ai.model, apiKey: ai.apiKey, baseUrl: ai.baseUrl,
@@ -459,7 +485,8 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
         const ai = activeAIs[i]
         const result = replies[i]
         const replyContent = result.status === 'fulfilled' ? result.value : `❌ 调用失败`
-        resultMessages.push(await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, replyContent, '竞标方案', { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model }))
+        resultMessages.push(await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, replyContent, '竞标方案',
+          { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model }))
       }
       resultMessages.push(await saveMessage(session_id, 'system', null, 'system', null, '✅ 所有方案已提交，请选出你最满意的方案'))
 
@@ -468,21 +495,24 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
       const shadowModePrompt = (cfg.shadow_prompt as string) || '你是审查员。请仔细审查以下回答，找出逻辑漏洞、潜在风险或可改进之处。'
       const actor = validAIs[0]
       const shadow = validAIs[1] || validAIs[0]
-      resultMessages.push(await saveMessage(session_id, 'system', null, 'system', null, `👤 执行者: ${actor.name}  |  👁 影子审查: ${shadow.name}`))
+      resultMessages.push(await saveMessage(session_id, 'system', null, 'system', null,
+        `👤 执行者: ${actor.name}  |  👁 影子审查: ${shadow.name}`))
       const actorReply = await callAI({
         provider: actor.provider, model: actor.model, apiKey: actor.apiKey, baseUrl: actor.baseUrl,
         messages: historyMessages,
         systemPrompt: buildSystemPrompt(actor.baseSystemPrompt, actorModePrompt),
         maxTokens: (cfg.max_tokens_actor as number) || 1000,
       })
-      resultMessages.push(await saveMessage(session_id, 'ai', actor.id, actor.name, actor.avatar, actorReply, '执行者', { model: actor.model }))
+      resultMessages.push(await saveMessage(session_id, 'ai', actor.id, actor.name, actor.avatar, actorReply, '执行者',
+        { model: actor.model }))
       const shadowReply = await callAI({
         provider: shadow.provider, model: shadow.model, apiKey: shadow.apiKey, baseUrl: shadow.baseUrl,
         messages: [{ role: 'user', content: `原始问题：${content}` }],
         systemPrompt: buildSystemPrompt(shadow.baseSystemPrompt, `${shadowModePrompt}\n\n【执行者的回答】\n${actorReply}`),
         maxTokens: (cfg.max_tokens_shadow as number) || 600,
       })
-      resultMessages.push(await saveMessage(session_id, 'ai', shadow.id, shadow.name, shadow.avatar, shadowReply, '影子审查', { model: shadow.model }))
+      resultMessages.push(await saveMessage(session_id, 'ai', shadow.id, shadow.name, shadow.avatar, shadowReply, '影子审查',
+        { model: shadow.model }))
 
     } else if (mode === 'judge') {
       const judgeModePrompt = (cfg.judge_prompt as string) || '你是主审官，请综合以下专家意见，给出最终裁决和理由。'
@@ -490,7 +520,8 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
       const judge = validAIs[0]
       const experts = validAIs.slice(1)
       const actualExperts = experts.length > 0 ? experts : validAIs
-      resultMessages.push(await saveMessage(session_id, 'system', null, 'system', null, `⚖️ 主审官模式 — 主审官: ${judge.name}，专家团: ${actualExperts.map((e) => e.name).join(', ')}`))
+      resultMessages.push(await saveMessage(session_id, 'system', null, 'system', null,
+        `⚖️ 主审官模式 — 主审官: ${judge.name}，专家团: ${actualExperts.map((e) => e.name).join(', ')}`))
       const expertReplies = await Promise.allSettled(
         actualExperts.slice(0, dimensions.length).map((ai, idx) => {
           const expertModePrompt = (cfg[`expert_${idx + 1}_prompt`] as string)
@@ -508,7 +539,9 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
         const ai = actualExperts[i]
         const result = expertReplies[i]
         const replyContent = result.status === 'fulfilled' ? result.value : '分析失败'
-        resultMessages.push(await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, replyContent, `专家·${dimensions[i] || i + 1}`, { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model }))
+        resultMessages.push(await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, replyContent,
+          `专家·${dimensions[i] || i + 1}`,
+          { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model }))
         expertsReport += `\n\n【${dimensions[i] || `专家${i + 1}`} 分析】(${ai.name}):\n${replyContent}`
       }
       const judgeReply = await callAI({
@@ -517,7 +550,8 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
         systemPrompt: buildSystemPrompt(judge.baseSystemPrompt, '你是最终裁决者，请整合所有专家意见，做出明确的最终判断和建议。'),
         maxTokens: (cfg.max_tokens_judge as number) || 1200,
       })
-      resultMessages.push(await saveMessage(session_id, 'ai', judge.id, `${judge.name} (主审官)`, judge.avatar, judgeReply, '主审官·最终裁决', { model: judge.model }))
+      resultMessages.push(await saveMessage(session_id, 'ai', judge.id, `${judge.name} (主审官)`, judge.avatar,
+        judgeReply, '主审官·最终裁决', { model: judge.model }))
 
     } else if (mode === 'rollcall') {
       const selectorModePrompt = (cfg.selector_prompt as string) || '根据用户的问题，从专家库中选出最合适的1-3位专家（用逗号分隔编号），只返回编号列表，如 "1,3"。'
@@ -529,9 +563,13 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
         messages: [{ role: 'user', content: `${selectorModePrompt}\n\n专家库:\n${expertList}\n\n用户问题: ${content}` }],
         maxTokens: 50,
       })
-      const indices = selected.match(/\d+/g)?.map((n) => parseInt(n) - 1)?.filter((i) => i >= 0 && i < validAIs.length)?.slice(0, (cfg.max_experts as number) || 3) || [0]
+      const indices = selected.match(/\d+/g)
+        ?.map((n) => parseInt(n) - 1)
+        ?.filter((i) => i >= 0 && i < validAIs.length)
+        ?.slice(0, (cfg.max_experts as number) || 3) || [0]
       const selectedExperts = indices.map((i) => validAIs[i]).filter(Boolean)
-      resultMessages.push(await saveMessage(session_id, 'system', null, 'system', null, `📋 点名模式 — 已调用: ${selectedExperts.map((e) => e.name).join(', ')}`))
+      resultMessages.push(await saveMessage(session_id, 'system', null, 'system', null,
+        `📋 点名模式 — 已调用: ${selectedExperts.map((e) => e.name).join(', ')}`))
       for (const ai of selectedExperts) {
         const reply = await callAI({
           provider: ai.provider, model: ai.model, apiKey: ai.apiKey, baseUrl: ai.baseUrl,
@@ -539,7 +577,8 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
           systemPrompt: buildSystemPrompt(ai.baseSystemPrompt, expertReplyModePrompt),
           maxTokens: (cfg.max_tokens as number) || 800,
         })
-        resultMessages.push(await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, reply, '专家发言', { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model }))
+        resultMessages.push(await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, reply, '专家发言',
+          { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model }))
       }
 
     } else {
@@ -556,13 +595,17 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
       for (let i = 0; i < activeAIs.length; i++) {
         const ai = activeAIs[i]
         const result = replies[i]
-        const replyContent = result.status === 'fulfilled' ? result.value : `❌ 调用失败: ${(result.reason as Error).message}`
-        resultMessages.push(await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, replyContent, undefined, { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model }))
+        const replyContent = result.status === 'fulfilled'
+          ? result.value
+          : `❌ 调用失败: ${(result.reason as Error).message}`
+        resultMessages.push(await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, replyContent, undefined,
+          { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model }))
       }
     }
   } catch (err) {
     console.error('Chat send error:', err)
-    resultMessages.push(await saveMessage(session_id, 'system', null, 'system', null, `❌ 发生错误: ${(err as Error).message}`))
+    resultMessages.push(await saveMessage(session_id, 'system', null, 'system', null,
+      `❌ 发生错误: ${(err as Error).message}`))
   }
 
   res.json({
