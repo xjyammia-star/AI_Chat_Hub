@@ -81,7 +81,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     set({ isSending: true })
 
-    const isDiscussionMode = activeMode === 'discussion'
+    const isDiscussionMode = (activeMode as string) === 'discussion'
 
     if (isDiscussionMode) {
       await handleSSESend(content, currentSession, activeMode, selectedAIIds, set, get)
