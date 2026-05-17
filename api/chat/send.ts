@@ -68,7 +68,6 @@ async function callAI(params: AICallParams): Promise<string> {
 
   const normalizedMessages = normalizeMessages(messages)
 
-  // ---- Gemini ----
   if (provider === 'gemini') {
     const url = `${baseUrl}/models/${model}:generateContent?key=${apiKey}`
     const userAssistantMessages = normalizedMessages.filter((m) => m.role !== 'system')
@@ -92,7 +91,6 @@ async function callAI(params: AICallParams): Promise<string> {
     return data.candidates?.[0]?.content?.parts?.[0]?.text || ''
   }
 
-  // ---- GLM JWT ----
   let authToken = apiKey || ''
   if (provider === 'glm' && apiKey && apiKey.includes('.')) {
     const [id, secret] = apiKey.split('.')
@@ -104,7 +102,6 @@ async function callAI(params: AICallParams): Promise<string> {
     authToken = `${header}.${payload}.${sig}`
   }
 
-  // ---- Ollama ----
   if (provider === 'ollama') {
     const allMessages = systemPrompt
       ? [{ role: 'system', content: systemPrompt }, ...normalizedMessages]
@@ -120,7 +117,6 @@ async function callAI(params: AICallParams): Promise<string> {
     return data.message?.content || ''
   }
 
-  // ---- OpenAI 兼容 ----
   const url = `${baseUrl}/chat/completions`
   const hunyuan = isHunyuanModel(baseUrl, model)
   const finalMessages = systemPrompt
@@ -227,13 +223,150 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
   const { session_id, content, mode = 'normal', selected_ai_ids = [] } = req.body
   if (!content?.trim()) { res.status(400).json({ error: '消息不能为空' }); return }
 
+  // ==================== 讨论模式单步请求 ====================
+  // 前端传 discussion_step: { ai_index, round, total_rounds, speeches, topic, ai_ids }
+  // 服务端只让指定的一个AI发言，立刻返回
+  const discussionStep = req.body.discussion_step
+  if (discussionStep) {
+    const { ai_index, round, total_rounds, speeches, topic, ai_ids, discussion_prompt, summary_prompt, max_tokens, temperature } = discussionStep
+
+    // 获取这一步要发言的 AI
+    const aiId = ai_ids[ai_index]
+    if (!aiId) {
+      res.json({ done: true })
+      return
+    }
+
+    const parts = aiId.split(':')
+    const [memberId, memberType = 'system'] = parts.length >= 2 ? [parts[0], parts[1]] : [aiId, 'system']
+    const aiConfig = await getAIConfig(memberId, memberType, authUser.id)
+
+    if (!aiConfig) {
+      res.json({ error: 'AI not found', skip: true })
+      return
+    }
+
+    const prompt = discussion_prompt || '你正在参与一场多AI自由讨论。请在已有发言基础上发表你自己的观点，简洁有力，不要重复别人已说的内容。'
+
+    // 构建讨论上下文
+    const recentSpeeches = (speeches || []).slice(-10)
+    let messages: Array<{ role: string; content: string }>
+
+    if (recentSpeeches.length === 0) {
+      messages = [{ role: 'user', content: topic }]
+    } else {
+      const historyText = recentSpeeches.map((s: any) => `${s.name}：${s.content}`).join('\n\n')
+      messages = [
+        { role: 'user', content: topic },
+        { role: 'assistant', content: '（以下是讨论记录）' },
+        { role: 'user', content: `【已有发言】\n${historyText}\n\n请发表你的观点。` },
+      ]
+    }
+
+    try {
+      const reply = await callAI({
+        provider: aiConfig.provider, model: aiConfig.model,
+        apiKey: aiConfig.apiKey, baseUrl: aiConfig.baseUrl,
+        messages,
+        systemPrompt: buildSystemPrompt(aiConfig.baseSystemPrompt, prompt),
+        maxTokens: max_tokens || 600,
+        temperature: temperature || 0.8,
+      })
+
+      const msg = await saveMessage(
+        session_id, 'ai', aiConfig.id, aiConfig.name, aiConfig.avatar, reply,
+        `第${round}轮`,
+        { model: aiConfig.model, display_model: aiConfig.model.startsWith('ep-') ? aiConfig.name : aiConfig.model, discussion_round: round }
+      )
+
+      // 计算下一步
+      const nextAiIndex = ai_index + 1
+      const isRoundEnd = nextAiIndex >= ai_ids.length
+      const nextRound = isRoundEnd ? round + 1 : round
+      const nextAiIndexInRound = isRoundEnd ? 0 : nextAiIndex
+      const isLastStep = nextRound > total_rounds
+
+      res.json({
+        message: msg,
+        next: isLastStep ? null : {
+          ai_index: nextAiIndexInRound,
+          round: nextRound,
+          is_round_start: isRoundEnd && !isLastStep,
+        },
+        is_last_step: isLastStep,
+      })
+    } catch (err) {
+      // 出错时跳过这个AI，继续下一个
+      const nextAiIndex = ai_index + 1
+      const isRoundEnd = nextAiIndex >= ai_ids.length
+      const nextRound = isRoundEnd ? round + 1 : round
+      const nextAiIndexInRound = isRoundEnd ? 0 : nextAiIndex
+      const isLastStep = nextRound > total_rounds
+
+      res.json({
+        error: (err as Error).message,
+        skip: true,
+        next: isLastStep ? null : {
+          ai_index: nextAiIndexInRound,
+          round: nextRound,
+          is_round_start: isRoundEnd && !isLastStep,
+        },
+        is_last_step: isLastStep,
+      })
+    }
+    return
+  }
+
+  // ==================== 讨论模式总结请求 ====================
+  const discussionSummary = req.body.discussion_summary
+  if (discussionSummary) {
+    const { summary_ai_id, ai_ids, speeches, topic, summary_prompt, max_tokens } = discussionSummary
+
+    // 找总结AI
+    const summaryAiId = summary_ai_id || ai_ids[0]
+    const parts = summaryAiId.split(':')
+    const [memberId, memberType = 'system'] = parts.length >= 2 ? [parts[0], parts[1]] : [summaryAiId, 'system']
+    const aiConfig = await getAIConfig(memberId, memberType, authUser.id)
+
+    if (!aiConfig) {
+      res.json({ error: 'Summary AI not found' })
+      return
+    }
+
+    const prompt = summary_prompt || '请对以上所有AI的讨论进行简洁总结，列出主要观点、共识和分歧。'
+    const allSpeeches = (speeches || []).map((s: any) => `${s.name}：${s.content}`).join('\n\n')
+
+    try {
+      const reply = await callAI({
+        provider: aiConfig.provider, model: aiConfig.model,
+        apiKey: aiConfig.apiKey, baseUrl: aiConfig.baseUrl,
+        messages: [
+          { role: 'user', content: topic },
+          { role: 'assistant', content: `（讨论记录）\n\n${allSpeeches}` },
+          { role: 'user', content: prompt },
+        ],
+        systemPrompt: buildSystemPrompt(aiConfig.baseSystemPrompt, '你现在需要对刚才的多AI讨论做总结。'),
+        maxTokens: max_tokens || 800,
+      })
+
+      const msg = await saveMessage(
+        session_id, 'ai', aiConfig.id, `${aiConfig.name} (总结)`, aiConfig.avatar,
+        reply, '讨论总结', { model: aiConfig.model, is_summary: true }
+      )
+
+      res.json({ message: msg })
+    } catch (err) {
+      res.json({ error: (err as Error).message })
+    }
+    return
+  }
+
   const [session] = await sql`SELECT * FROM chat_sessions WHERE id = ${session_id} AND user_id = ${authUser.id}`
   if (!session) { res.status(404).json({ error: '会话不存在' }); return }
 
   const [modeConfig] = await sql`SELECT * FROM chat_modes WHERE mode_key = ${mode} AND is_enabled = true`
   const cfg = (modeConfig?.config as Record<string, unknown>) || {}
 
-  // ---- 取历史消息，AI 回复加上说话人标注，防止角色混淆 ----
   const history = await sql`
     SELECT sender_type, sender_name, content FROM chat_messages
     WHERE session_id = ${session_id}
@@ -244,10 +377,7 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
   `
   const historyMessages = history.reverse().map((m: Record<string, string>) => ({
     role: m.sender_type === 'user' ? 'user' : 'assistant',
-    // AI 的回复加上 [名字]: 前缀，让每个 AI 知道哪些话是谁说的
-    content: m.sender_type === 'user'
-      ? m.content
-      : `[${m.sender_name}]: ${m.content}`,
+    content: m.sender_type === 'user' ? m.content : `[${m.sender_name}]: ${m.content}`,
   }))
 
   let aiConfigs
@@ -314,10 +444,31 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
     return
   }
 
-  try {
-    const isDiscussion = mode === 'discussion' || cfg.discussion_mode === true
+  // 讨论模式：前端轮询，这里只负责发送启动信号
+  const isDiscussion = mode === 'discussion' || cfg.discussion_mode === true
+  if (isDiscussion) {
+    // 返回讨论配置给前端，前端负责轮询
+    const startMsg = await saveMessage(session_id, 'system', null, 'system', null,
+      `💬 自由讨论开始 — 参与者: ${activeAIs.map(a => a.name).join(', ')} · 最多 ${(cfg.max_rounds as number) || 3} 轮`)
+    sseWrite(res, 'message', startMsg)
+    sseWrite(res, 'discussion_start', {
+      session_id,
+      topic: content,
+      ai_ids: activeAIs.map(ai => ai.id),
+      total_rounds: (cfg.max_rounds as number) || 3,
+      enable_summary: cfg.enable_summary !== false,
+      summary_ai_id: (cfg.summary_ai_id as string) || null,
+      discussion_prompt: (cfg.discussion_prompt as string) || '',
+      summary_prompt: (cfg.summary_prompt as string) || '',
+      max_tokens: (cfg.max_tokens as number) || 600,
+      temperature: (cfg.temperature as number) || 0.8,
+    })
+    sseWrite(res, 'done', { session_id })
+    res.end()
+    return
+  }
 
-    // ==================== 普通模式：并行，谁先完成谁先推送 ====================
+  try {
     if (mode === 'normal') {
       for (const ai of activeAIs) {
         sseWrite(res, 'thinking', { ai_id: ai.id, ai_name: ai.name, ai_avatar: ai.avatar })
@@ -343,7 +494,6 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
         })
       )
 
-    // ==================== 竞标模式：并行，谁先完成谁先推送 ====================
     } else if (mode === 'bidding') {
       const biddingModePrompt = (cfg.bidding_prompt as string) || '请针对用户的问题提交你的最佳方案。要有创意，要具体，要有说服力。'
       const systemMsg = await saveMessage(session_id, 'system', null, 'system', null,
@@ -372,10 +522,9 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
           }
         })
       )
-      const endMsg = await saveMessage(session_id, 'system', null, 'system', null, '✅ 所有方案已提交，请选出你最满意的方案')
+      const endMsg = await saveMessage(session_id, 'system', null, 'system', null, '✅ 所有方案已提交')
       sseWrite(res, 'message', endMsg)
 
-    // ==================== 影子模式：串行 ====================
     } else if (mode === 'shadow') {
       const actorModePrompt = (cfg.actor_prompt as string) || '请直接完成用户的任务，给出最好的答案。'
       const shadowModePrompt = (cfg.shadow_prompt as string) || '你是审查员。请仔细审查以下回答，找出逻辑漏洞、潜在风险或可改进之处。'
@@ -404,7 +553,6 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
         { model: shadow.model })
       sseWrite(res, 'message', shadowMsg)
 
-    // ==================== 主审官模式：专家并行，主审官最后 ====================
     } else if (mode === 'judge') {
       const judgeModePrompt = (cfg.judge_prompt as string) || '你是主审官，请综合以下专家意见，给出最终裁决和理由。'
       const dimensions = (cfg.expert_dimensions as string[]) || ['维度一', '维度二', '维度三']
@@ -456,7 +604,6 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
         judgeReply, '主审官·最终裁决', { model: judge.model })
       sseWrite(res, 'message', judgeMsg)
 
-    // ==================== 点名模式：被点名者并行 ====================
     } else if (mode === 'rollcall') {
       const selectorModePrompt = (cfg.selector_prompt as string) || '根据用户的问题，从专家库中选出最合适的1-3位专家（用逗号分隔编号），只返回编号列表，如 "1,3"。'
       const expertReplyModePrompt = (cfg.expert_reply_prompt as string) || ''
@@ -498,77 +645,6 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
         })
       )
 
-    // ==================== 自由讨论模式：串行多轮 ====================
-    } else if (isDiscussion) {
-      const maxRounds     = (cfg.max_rounds as number)    || 3
-      const maxSeconds    = (cfg.max_seconds as number)   || 0
-      const enableSummary = cfg.enable_summary !== false
-      const summaryAIId   = (cfg.summary_ai_id as string) || null
-      const discussionPrompt = (cfg.discussion_prompt as string)
-        || '你正在参与一场多AI自由讨论。请认真阅读前面所有发言，在此基础上发表你自己的观点、补充信息或对他人观点的看法。每次发言保持简洁，不要重复已有内容。'
-      const summaryPrompt = (cfg.summary_prompt as string)
-        || '请对以上所有AI的讨论进行简洁总结，列出主要观点、共识和分歧。'
-      const startMsg = await saveMessage(session_id, 'system', null, 'system', null,
-        `💬 自由讨论开始 — 参与者: ${activeAIs.map(a => a.name).join(', ')} · 最多 ${maxRounds} 轮${maxSeconds > 0 ? ` · 限时 ${maxSeconds} 秒` : ''}`)
-      sseWrite(res, 'message', startMsg)
-      const discussionContext: Array<{ role: string; content: string }> = [{ role: 'user', content }]
-      const startTime = Date.now()
-      let stopped = false
-      for (let round = 1; round <= maxRounds && !stopped; round++) {
-        if (maxSeconds > 0 && (Date.now() - startTime) / 1000 >= maxSeconds) {
-          const timeoutMsg = await saveMessage(session_id, 'system', null, 'system', null,
-            `⏱ 讨论时间到（${maxSeconds} 秒），讨论结束`)
-          sseWrite(res, 'message', timeoutMsg)
-          stopped = true
-          break
-        }
-        const roundMsg = await saveMessage(session_id, 'system', null, 'system', null, `── 第 ${round} 轮 ──`)
-        sseWrite(res, 'message', roundMsg)
-        for (const ai of activeAIs) {
-          if (maxSeconds > 0 && (Date.now() - startTime) / 1000 >= maxSeconds) { stopped = true; break }
-          sseWrite(res, 'thinking', { ai_id: ai.id, ai_name: ai.name, ai_avatar: ai.avatar })
-          try {
-            const reply = await callAI({
-              provider: ai.provider, model: ai.model, apiKey: ai.apiKey, baseUrl: ai.baseUrl,
-              messages: [...discussionContext],
-              systemPrompt: buildSystemPrompt(ai.baseSystemPrompt, discussionPrompt),
-              maxTokens: (cfg.max_tokens as number) || 600,
-              temperature: (cfg.temperature as number) || 0.8,
-            })
-            discussionContext.push({ role: 'assistant', content: `[${ai.name}]: ${reply}` })
-            const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, reply, `第${round}轮`,
-              { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model, discussion_round: round })
-            sseWrite(res, 'message', msg)
-          } catch (err) {
-            const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar,
-              `❌ 调用失败: ${(err as Error).message}`, `第${round}轮`, { model: ai.model })
-            sseWrite(res, 'message', msg)
-          }
-        }
-      }
-      if (enableSummary) {
-        const summaryAI = (summaryAIId ? activeAIs.find(ai => ai.id === summaryAIId) : null) || activeAIs[0]
-        sseWrite(res, 'thinking', { ai_id: summaryAI.id, ai_name: summaryAI.name, ai_avatar: summaryAI.avatar })
-        try {
-          const summaryReply = await callAI({
-            provider: summaryAI.provider, model: summaryAI.model, apiKey: summaryAI.apiKey, baseUrl: summaryAI.baseUrl,
-            messages: [...discussionContext, { role: 'user', content: summaryPrompt }],
-            systemPrompt: buildSystemPrompt(summaryAI.baseSystemPrompt, '你现在需要对刚才的多AI讨论做总结。'),
-            maxTokens: (cfg.max_tokens_summary as number) || 800,
-          })
-          const summaryMsg = await saveMessage(session_id, 'ai', summaryAI.id, `${summaryAI.name} (总结)`,
-            summaryAI.avatar, summaryReply, '讨论总结', { model: summaryAI.model, is_summary: true })
-          sseWrite(res, 'message', summaryMsg)
-        } catch (err) {
-          const msg = await saveMessage(session_id, 'system', null, 'system', null,
-            `❌ 总结生成失败: ${(err as Error).message}`)
-          sseWrite(res, 'message', msg)
-        }
-      }
-      const endMsg = await saveMessage(session_id, 'system', null, 'system', null, '✅ 讨论结束')
-      sseWrite(res, 'message', endMsg)
-
-    // ==================== 自定义模式：并行，谁先完成谁先推送 ====================
     } else {
       const defaultModePrompt = (cfg.default_prompt as string) || ''
       for (const ai of activeAIs) {
