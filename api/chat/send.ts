@@ -160,7 +160,6 @@ async function getAIConfig(memberId: string, memberType: string, userId: string)
 
   const apiKey = member.api_key_enc ? decryptKey(member.api_key_enc as string) : undefined
 
-  // ★ 注入爵位积分激励机制说明
   const groupChatPrompt = `你正在参与一个多AI群聊对话。群里有多个来自不同公司的AI助手同时在线，大家共同回应用户的消息。
 
 【群聊基本规则】
@@ -232,6 +231,41 @@ function getTitleName(score: number): string {
   if (score >= 150) return '伯爵'
   if (score >= 50) return '子爵'
   return '男爵'
+}
+
+// ★ 修复：把历史消息里其他AI的发言放入 user 消息，避免AI误以为是自己说的
+function buildHistoryMessages(
+  history: Array<{ sender_type: string; sender_name: string; content: string }>
+): Array<{ role: string; content: string }> {
+  const result: Array<{ role: string; content: string }> = []
+  let pendingAISpeeches: string[] = []
+
+  for (const m of history) {
+    if (m.sender_type === 'user') {
+      // 先把积累的AI发言作为一条 user 消息推入（第三方视角）
+      if (pendingAISpeeches.length > 0) {
+        result.push({
+          role: 'user',
+          content: `【群聊成员的发言记录】\n${pendingAISpeeches.join('\n\n')}`,
+        })
+        pendingAISpeeches = []
+      }
+      result.push({ role: 'user', content: m.content })
+    } else {
+      // AI发言先收集，不作为 assistant role
+      pendingAISpeeches.push(`${m.sender_name}：${m.content}`)
+    }
+  }
+
+  // 末尾残留的AI发言（最新一批，还没有下一条user消息）
+  if (pendingAISpeeches.length > 0) {
+    result.push({
+      role: 'user',
+      content: `【群聊成员的发言记录】\n${pendingAISpeeches.join('\n\n')}`,
+    })
+  }
+
+  return result
 }
 
 export default requireAuth(async (req, res, authUser): Promise<void> => {
@@ -409,18 +443,17 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
   const [modeConfig] = await sql`SELECT * FROM chat_modes WHERE mode_key = ${mode} AND is_enabled = true`
   const cfg = (modeConfig?.config as Record<string, unknown>) || {}
 
+  // ★ 修复：用新函数构建历史消息，避免AI把其他人发言当成自己说的
   const history = await sql`
     SELECT sender_type, sender_name, content FROM chat_messages
     WHERE session_id = ${session_id}
       AND sender_type IN ('user', 'ai')
       AND content NOT LIKE '%调用失败%'
       AND content NOT LIKE '%❌%'
+      AND (metadata->>'is_reaction_reply' IS NULL OR metadata->>'is_reaction_reply' = 'false')
     ORDER BY created_at DESC LIMIT 20
   `
-  const historyMessages = history.reverse().map((m: Record<string, string>) => ({
-    role: m.sender_type === 'user' ? 'user' : 'assistant',
-    content: m.sender_type === 'user' ? m.content : `[${m.sender_name}]: ${m.content}`,
-  }))
+  const historyMessages = buildHistoryMessages(history.reverse())
 
   let aiConfigs
   if (selected_ai_ids && selected_ai_ids.length > 0) {
