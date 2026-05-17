@@ -8,6 +8,31 @@ export type ChatMode = 'normal' | 'judge' | 'bidding' | 'shadow' | 'rollcall'
 export type AIMemberType = 'system' | 'user'
 export type SenderType = 'user' | 'ai' | 'system'
 
+// ---- 爵位系统 ----
+export type NobleTitle = '男爵' | '子爵' | '伯爵' | '侯爵' | '公爵'
+
+export interface TitleInfo {
+  title: NobleTitle
+  icon: string
+  minScore: number
+  color: string
+}
+
+export const NOBLE_TITLES: TitleInfo[] = [
+  { title: '男爵', icon: '⭐', minScore: 0,   color: '#9ca3af' },
+  { title: '子爵', icon: '🌙', minScore: 50,  color: '#818cf8' },
+  { title: '伯爵', icon: '☀️', minScore: 150, color: '#fbbf24' },
+  { title: '侯爵', icon: '💎', minScore: 300, color: '#34d399' },
+  { title: '公爵', icon: '👑', minScore: 500, color: '#f472b6' },
+]
+
+export function getTitleInfo(score: number): TitleInfo {
+  for (let i = NOBLE_TITLES.length - 1; i >= 0; i--) {
+    if (score >= NOBLE_TITLES[i].minScore) return NOBLE_TITLES[i]
+  }
+  return NOBLE_TITLES[0]
+}
+
 // ---- 用户 ----
 export interface User {
   id: string
@@ -120,6 +145,7 @@ export interface ChatMessage {
     error?: string
     thinking?: boolean        // 是否正在思考中（流式）
     mode_step?: string        // 模式步骤标识
+    is_reaction_reply?: boolean  // 是否是点赞/踩触发的回复
   }
   created_at: string
 }
@@ -172,6 +198,7 @@ export interface ChatState {
   isSending: boolean
   activeMode: ChatMode
   selectedAIIds: string[]
+  reputationScores: Record<string, number>   // ai_member_id -> score
   setCurrentSession: (session: ChatSession | null) => void
   setActiveMode: (mode: ChatMode) => void
   toggleAIMember: (id: string) => void
@@ -182,4 +209,6 @@ export interface ChatState {
   updateSessionTitle: (id: string, title: string) => Promise<void>
   deleteSession: (id: string) => Promise<void>
   archiveSession: (id: string) => Promise<void>
+  loadReputationScores: () => Promise<void>
+  reactToMessage: (messageId: string, reaction: 'up' | 'down') => Promise<void>
 }
