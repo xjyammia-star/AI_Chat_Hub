@@ -37,6 +37,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   isSending: false,
   activeMode: 'normal',
   selectedAIIds: [],
+  reputationScores: {},
 
   setCurrentSession: (session) => {
     set({ currentSession: session, messages: [] })
@@ -114,6 +115,40 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) => ({
       sessions: state.sessions.map((s) => s.id === id ? { ...s, is_archived: true } : s),
     }))
+  },
+
+  // ---- 爵位积分 ----
+  loadReputationScores: async () => {
+    try {
+      const res = await apiRequest('/reputation')
+      if (!res.ok) return
+      const data = await res.json()
+      set({ reputationScores: data.scores || {} })
+    } catch { /* 静默失败 */ }
+  },
+
+  reactToMessage: async (messageId, reaction) => {
+    try {
+      const res = await apiRequest('/chat/react', {
+        method: 'POST',
+        body: JSON.stringify({ message_id: messageId, reaction }),
+      })
+      if (!res.ok) return
+      const data = await res.json()
+      // 更新积分
+      if (data.new_score !== undefined && data.reply_message?.sender_id) {
+        const aiId = data.reply_message.sender_id
+        set((state) => ({
+          reputationScores: { ...state.reputationScores, [aiId]: data.new_score },
+        }))
+      }
+      // 把AI的感谢/道歉回复追加到消息列表
+      if (data.reply_message) {
+        set((state) => ({ messages: [...state.messages, data.reply_message] }))
+      }
+    } catch (e) {
+      console.error('reactToMessage error:', e)
+    }
   },
 }))
 
@@ -210,7 +245,6 @@ async function handleSSESend(
             }
 
           } else if (eventType === 'done') {
-            // 清理残留思考气泡
             const remainingIds = Object.values(thinkingIds)
             if (remainingIds.length > 0) {
               set((state: any) => ({
@@ -219,7 +253,6 @@ async function handleSSESend(
             }
 
             if (discussionConfig) {
-              // 讨论模式：在 done 事件里直接启动轮询，用 setTimeout 避免阻塞当前帧
               const configToUse = discussionConfig
               discussionConfig = null
               setTimeout(() => {
@@ -239,7 +272,6 @@ async function handleSSESend(
     console.error('SSE read error:', e)
   } finally {
     reader.releaseLock()
-    // finally 只清理非讨论模式的状态，讨论模式由 runDiscussionPolling 自己管理
     if (!discussionState.isRunning) {
       set((state: any) => ({
         isSending: false,
@@ -270,7 +302,6 @@ async function runDiscussionPolling(
   let currentAiIndex = 0
   let currentRound = 1
 
-  // 显示第一轮标记
   set((state: any) => ({
     messages: [...state.messages, {
       id: `round-1-${Date.now()}`,
@@ -324,7 +355,6 @@ async function runDiscussionPolling(
 
         const data = await resp.json()
 
-        // 替换思考气泡
         set((state: any) => {
           const filtered = state.messages.filter((m: ChatMessage) => m.id !== thinkingId)
           if (data.message) {
@@ -336,14 +366,12 @@ async function runDiscussionPolling(
 
         if (discussionState.shouldStop) break
 
-        // 移动到下一步
         if (data.next) {
           const wasRoundEnd = data.next.is_round_start
           const newRound = data.next.round
           currentAiIndex = data.next.ai_index
           currentRound = newRound
 
-          // 新一轮标记
           if (wasRoundEnd && newRound <= total_rounds && !discussionState.shouldStop) {
             set((state: any) => ({
               messages: [...state.messages, {
@@ -363,7 +391,6 @@ async function runDiscussionPolling(
 
       } catch (err) {
         console.error('Discussion step error:', err)
-        // 出错跳过这个AI
         set((state: any) => ({
           messages: state.messages.filter((m: ChatMessage) => m.id !== thinkingId)
         }))
@@ -372,7 +399,6 @@ async function runDiscussionPolling(
       }
     }
 
-    // 总结
     if (enable_summary && !discussionState.shouldStop && speeches.length > 0) {
       const summaryAiId = summary_ai_id || ai_ids[0]
       const thinkingId = `thinking-summary-${Date.now()}`
