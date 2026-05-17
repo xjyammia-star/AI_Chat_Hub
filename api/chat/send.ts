@@ -1,5 +1,7 @@
 // api/chat/send.ts
-// 全模式 SSE 流式输出 — 每条消息生成完立刻推送，与模式逻辑解耦
+// 全模式 SSE 流式输出 + 点赞/踩处理（合并节省 Serverless Function 配额）
+// POST /api/chat/send           — 正常发消息
+// POST /api/chat/send?action=react — 点赞/踩
 
 import { requireAuth } from '../_lib/middleware.js'
 import sql from '../_lib/db.js'
@@ -224,37 +226,122 @@ function sseHeaders(res: any) {
   res.flushHeaders()
 }
 
+function getTitleName(score: number): string {
+  if (score >= 500) return '公爵'
+  if (score >= 300) return '侯爵'
+  if (score >= 150) return '伯爵'
+  if (score >= 50) return '子爵'
+  return '男爵'
+}
+
 export default requireAuth(async (req, res, authUser): Promise<void> => {
   if (req.method !== 'POST') { res.status(405).json({ error: 'Method not allowed' }); return }
 
+  // ==================== 点赞/踩 分支 ====================
+  const action = req.query.action as string
+  if (action === 'react') {
+    const { message_id, reaction } = req.body
+    if (!message_id || !['up', 'down'].includes(reaction)) {
+      res.status(400).json({ error: '参数错误' }); return
+    }
+    const [message] = await sql`
+      SELECT cm.*, cs.user_id as session_user_id
+      FROM chat_messages cm
+      JOIN chat_sessions cs ON cs.id = cm.session_id
+      WHERE cm.id = ${message_id}
+        AND cm.sender_type = 'ai'
+        AND cs.user_id = ${authUser.id}
+    `
+    if (!message) { res.status(404).json({ error: '消息不存在' }); return }
+
+    const aiMemberId = message.sender_id as string
+    if (!aiMemberId) { res.status(400).json({ error: '无法识别 AI 成员' }); return }
+
+    const delta = reaction === 'up' ? 10 : -10
+    const [repRow] = await sql`
+      INSERT INTO ai_reputation (user_id, ai_member_id, score)
+      VALUES (${authUser.id}, ${aiMemberId}, ${delta})
+      ON CONFLICT (user_id, ai_member_id)
+      DO UPDATE SET
+        score = GREATEST(0, ai_reputation.score + ${delta}),
+        updated_at = NOW()
+      RETURNING score
+    `
+    const newScore = repRow.score as number
+
+    let member: Record<string, unknown> | null = null
+    const sysRows = await sql`SELECT * FROM system_ai_members WHERE id = ${aiMemberId} AND is_enabled = true`
+    if (sysRows.length > 0) {
+      member = sysRows[0]
+    } else {
+      const userRows = await sql`SELECT * FROM user_ai_members WHERE id = ${aiMemberId} AND user_id = ${authUser.id} AND is_enabled = true`
+      if (userRows.length > 0) member = userRows[0]
+    }
+
+    if (!member) { res.json({ new_score: newScore, reply_message: null }); return }
+
+    const [config] = await sql`
+      SELECT custom_name, custom_avatar FROM user_ai_configs
+      WHERE user_id = ${authUser.id} AND ai_member_id = ${aiMemberId}
+    `
+    const displayName = (config?.custom_name || member.name) as string
+    const displayAvatar = (config?.custom_avatar || member.avatar || '🤖') as string
+    const apiKey = member.api_key_enc ? decryptKey(member.api_key_enc as string) : undefined
+    const titleName = getTitleName(newScore)
+
+    const originalContent = (message.content as string).slice(0, 200)
+    const reactionPrompt = reaction === 'up'
+      ? `用户对你刚才的发言点了赞👍，你的当前爵位是「${titleName}」，积分为 ${newScore} 分。请用1-2句话表示感谢，语气符合你的角色设定，可以提到爵位和积分，保持简洁生动。`
+      : `用户对你刚才的发言表示不满意👎，你的当前爵位是「${titleName}」，积分为 ${newScore} 分。请用1-2句话诚恳道歉并表示会改进，语气符合你的角色设定，保持简洁。`
+
+    let replyContent = ''
+    try {
+      replyContent = await callAI({
+        provider: member.provider as string,
+        model: member.model as string,
+        apiKey,
+        baseUrl: member.base_url as string | undefined,
+        messages: [
+          { role: 'assistant', content: originalContent },
+          { role: 'user', content: reactionPrompt },
+        ],
+        maxTokens: 150,
+        temperature: 0.9,
+      })
+    } catch {
+      replyContent = reaction === 'up'
+        ? `谢谢您的认可！目前积分 ${newScore} 分（${titleName}），我会继续努力！`
+        : `抱歉没能达到您的期望。目前积分 ${newScore} 分（${titleName}），我会认真改进！`
+    }
+
+    const [replyMsg] = await sql`
+      INSERT INTO chat_messages (session_id, sender_type, sender_id, sender_name, sender_avatar, content, metadata)
+      VALUES (
+        ${message.session_id}, 'ai', ${aiMemberId}, ${displayName}, ${displayAvatar}, ${replyContent},
+        ${JSON.stringify({ model: member.model, is_reaction_reply: true, reaction, score_after: newScore })}
+      )
+      RETURNING *
+    `
+    res.json({ new_score: newScore, reply_message: replyMsg })
+    return
+  }
+
+  // ==================== 正常发消息 ====================
   const { session_id, content, mode = 'normal', selected_ai_ids = [] } = req.body
   if (!content?.trim()) { res.status(400).json({ error: '消息不能为空' }); return }
 
-  // ==================== 讨论模式单步请求 ====================
   const discussionStep = req.body.discussion_step
   if (discussionStep) {
     const { ai_index, round, total_rounds, speeches, topic, ai_ids, discussion_prompt, summary_prompt, max_tokens, temperature } = discussionStep
-
     const aiId = ai_ids[ai_index]
-    if (!aiId) {
-      res.json({ done: true })
-      return
-    }
-
+    if (!aiId) { res.json({ done: true }); return }
     const parts = aiId.split(':')
     const [memberId, memberType = 'system'] = parts.length >= 2 ? [parts[0], parts[1]] : [aiId, 'system']
     const aiConfig = await getAIConfig(memberId, memberType, authUser.id)
-
-    if (!aiConfig) {
-      res.json({ error: 'AI not found', skip: true })
-      return
-    }
-
+    if (!aiConfig) { res.json({ error: 'AI not found', skip: true }); return }
     const prompt = discussion_prompt || '你正在参与一场多AI自由讨论。请在已有发言基础上发表你自己的观点，简洁有力，不要重复别人已说的内容。'
-
     const recentSpeeches = (speeches || []).slice(-10)
     let messages: Array<{ role: string; content: string }>
-
     if (recentSpeeches.length === 0) {
       messages = [{ role: 'user', content: topic }]
     } else {
@@ -265,95 +352,50 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
         { role: 'user', content: `【已有发言】\n${historyText}\n\n请发表你的观点。` },
       ]
     }
-
     try {
       const reply = await callAI({
         provider: aiConfig.provider, model: aiConfig.model,
         apiKey: aiConfig.apiKey, baseUrl: aiConfig.baseUrl,
-        messages,
-        systemPrompt: buildSystemPrompt(aiConfig.baseSystemPrompt, prompt),
-        maxTokens: max_tokens || 600,
-        temperature: temperature || 0.8,
+        messages, systemPrompt: buildSystemPrompt(aiConfig.baseSystemPrompt, prompt),
+        maxTokens: max_tokens || 600, temperature: temperature || 0.8,
       })
-
-      const msg = await saveMessage(
-        session_id, 'ai', aiConfig.id, aiConfig.name, aiConfig.avatar, reply,
-        `第${round}轮`,
-        { model: aiConfig.model, display_model: aiConfig.model.startsWith('ep-') ? aiConfig.name : aiConfig.model, discussion_round: round }
-      )
-
+      const msg = await saveMessage(session_id, 'ai', aiConfig.id, aiConfig.name, aiConfig.avatar, reply, `第${round}轮`,
+        { model: aiConfig.model, display_model: aiConfig.model.startsWith('ep-') ? aiConfig.name : aiConfig.model, discussion_round: round })
       const nextAiIndex = ai_index + 1
       const isRoundEnd = nextAiIndex >= ai_ids.length
       const nextRound = isRoundEnd ? round + 1 : round
       const nextAiIndexInRound = isRoundEnd ? 0 : nextAiIndex
       const isLastStep = nextRound > total_rounds
-
-      res.json({
-        message: msg,
-        next: isLastStep ? null : {
-          ai_index: nextAiIndexInRound,
-          round: nextRound,
-          is_round_start: isRoundEnd && !isLastStep,
-        },
-        is_last_step: isLastStep,
-      })
+      res.json({ message: msg, next: isLastStep ? null : { ai_index: nextAiIndexInRound, round: nextRound, is_round_start: isRoundEnd && !isLastStep }, is_last_step: isLastStep })
     } catch (err) {
       const nextAiIndex = ai_index + 1
       const isRoundEnd = nextAiIndex >= ai_ids.length
       const nextRound = isRoundEnd ? round + 1 : round
       const nextAiIndexInRound = isRoundEnd ? 0 : nextAiIndex
       const isLastStep = nextRound > total_rounds
-
-      res.json({
-        error: (err as Error).message,
-        skip: true,
-        next: isLastStep ? null : {
-          ai_index: nextAiIndexInRound,
-          round: nextRound,
-          is_round_start: isRoundEnd && !isLastStep,
-        },
-        is_last_step: isLastStep,
-      })
+      res.json({ error: (err as Error).message, skip: true, next: isLastStep ? null : { ai_index: nextAiIndexInRound, round: nextRound, is_round_start: isRoundEnd && !isLastStep }, is_last_step: isLastStep })
     }
     return
   }
 
-  // ==================== 讨论模式总结请求 ====================
   const discussionSummary = req.body.discussion_summary
   if (discussionSummary) {
     const { summary_ai_id, ai_ids, speeches, topic, summary_prompt, max_tokens } = discussionSummary
-
     const summaryAiId = summary_ai_id || ai_ids[0]
     const parts = summaryAiId.split(':')
     const [memberId, memberType = 'system'] = parts.length >= 2 ? [parts[0], parts[1]] : [summaryAiId, 'system']
     const aiConfig = await getAIConfig(memberId, memberType, authUser.id)
-
-    if (!aiConfig) {
-      res.json({ error: 'Summary AI not found' })
-      return
-    }
-
+    if (!aiConfig) { res.json({ error: 'Summary AI not found' }); return }
     const prompt = summary_prompt || '请对以上所有AI的讨论进行简洁总结，列出主要观点、共识和分歧。'
     const allSpeeches = (speeches || []).map((s: any) => `${s.name}：${s.content}`).join('\n\n')
-
     try {
       const reply = await callAI({
-        provider: aiConfig.provider, model: aiConfig.model,
-        apiKey: aiConfig.apiKey, baseUrl: aiConfig.baseUrl,
-        messages: [
-          { role: 'user', content: topic },
-          { role: 'assistant', content: `（讨论记录）\n\n${allSpeeches}` },
-          { role: 'user', content: prompt },
-        ],
+        provider: aiConfig.provider, model: aiConfig.model, apiKey: aiConfig.apiKey, baseUrl: aiConfig.baseUrl,
+        messages: [{ role: 'user', content: topic }, { role: 'assistant', content: `（讨论记录）\n\n${allSpeeches}` }, { role: 'user', content: prompt }],
         systemPrompt: buildSystemPrompt(aiConfig.baseSystemPrompt, '你现在需要对刚才的多AI讨论做总结。'),
         maxTokens: max_tokens || 800,
       })
-
-      const msg = await saveMessage(
-        session_id, 'ai', aiConfig.id, `${aiConfig.name} (总结)`, aiConfig.avatar,
-        reply, '讨论总结', { model: aiConfig.model, is_summary: true }
-      )
-
+      const msg = await saveMessage(session_id, 'ai', aiConfig.id, `${aiConfig.name} (总结)`, aiConfig.avatar, reply, '讨论总结', { model: aiConfig.model, is_summary: true })
       res.json({ message: msg })
     } catch (err) {
       res.json({ error: (err as Error).message })
@@ -426,11 +468,7 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
   sseWrite(res, 'message', userMsg)
 
   if (activeLocalAIs.length > 0 && activeAIs.length === 0) {
-    sseWrite(res, 'local_ai_calls', activeLocalAIs.map(ai => ({
-      id: ai.id, name: ai.name, avatar: ai.avatar,
-      model: ai.model, base_url: ai.baseUrl || 'http://localhost:11434',
-      system_prompt: ai.baseSystemPrompt,
-    })))
+    sseWrite(res, 'local_ai_calls', activeLocalAIs.map(ai => ({ id: ai.id, name: ai.name, avatar: ai.avatar, model: ai.model, base_url: ai.baseUrl || 'http://localhost:11434', system_prompt: ai.baseSystemPrompt })))
     sseWrite(res, 'done', { session_id })
     res.end()
     return
@@ -446,21 +484,9 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
 
   const isDiscussion = mode === 'discussion' || cfg.discussion_mode === true
   if (isDiscussion) {
-    const startMsg = await saveMessage(session_id, 'system', null, 'system', null,
-      `💬 自由讨论开始 — 参与者: ${activeAIs.map(a => a.name).join(', ')} · 最多 ${(cfg.max_rounds as number) || 3} 轮`)
+    const startMsg = await saveMessage(session_id, 'system', null, 'system', null, `💬 自由讨论开始 — 参与者: ${activeAIs.map(a => a.name).join(', ')} · 最多 ${(cfg.max_rounds as number) || 3} 轮`)
     sseWrite(res, 'message', startMsg)
-    sseWrite(res, 'discussion_start', {
-      session_id,
-      topic: content,
-      ai_ids: activeAIs.map(ai => ai.id),
-      total_rounds: (cfg.max_rounds as number) || 3,
-      enable_summary: cfg.enable_summary !== false,
-      summary_ai_id: (cfg.summary_ai_id as string) || null,
-      discussion_prompt: (cfg.discussion_prompt as string) || '',
-      summary_prompt: (cfg.summary_prompt as string) || '',
-      max_tokens: (cfg.max_tokens as number) || 600,
-      temperature: (cfg.temperature as number) || 0.8,
-    })
+    sseWrite(res, 'discussion_start', { session_id, topic: content, ai_ids: activeAIs.map(ai => ai.id), total_rounds: (cfg.max_rounds as number) || 3, enable_summary: cfg.enable_summary !== false, summary_ai_id: (cfg.summary_ai_id as string) || null, discussion_prompt: (cfg.discussion_prompt as string) || '', summary_prompt: (cfg.summary_prompt as string) || '', max_tokens: (cfg.max_tokens as number) || 600, temperature: (cfg.temperature as number) || 0.8 })
     sseWrite(res, 'done', { session_id })
     res.end()
     return
@@ -468,220 +494,116 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
 
   try {
     if (mode === 'normal') {
-      for (const ai of activeAIs) {
-        sseWrite(res, 'thinking', { ai_id: ai.id, ai_name: ai.name, ai_avatar: ai.avatar })
-      }
-      await Promise.allSettled(
-        activeAIs.map(async (ai) => {
-          try {
-            const reply = await callAI({
-              provider: ai.provider, model: ai.model, apiKey: ai.apiKey, baseUrl: ai.baseUrl,
-              messages: historyMessages, systemPrompt: ai.baseSystemPrompt,
-              maxTokens: (cfg.max_tokens as number) || 1500,
-              temperature: (cfg.temperature as number) || 0.7,
-            })
-            const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, reply, undefined,
-              { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model })
-            sseWrite(res, 'message', msg)
-          } catch (err) {
-            const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar,
-              `❌ 调用失败: ${(err as Error).message}`, undefined,
-              { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model })
-            sseWrite(res, 'message', msg)
-          }
-        })
-      )
-
+      for (const ai of activeAIs) sseWrite(res, 'thinking', { ai_id: ai.id, ai_name: ai.name, ai_avatar: ai.avatar })
+      await Promise.allSettled(activeAIs.map(async (ai) => {
+        try {
+          const reply = await callAI({ provider: ai.provider, model: ai.model, apiKey: ai.apiKey, baseUrl: ai.baseUrl, messages: historyMessages, systemPrompt: ai.baseSystemPrompt, maxTokens: (cfg.max_tokens as number) || 1500, temperature: (cfg.temperature as number) || 0.7 })
+          const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, reply, undefined, { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model })
+          sseWrite(res, 'message', msg)
+        } catch (err) {
+          const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, `❌ 调用失败: ${(err as Error).message}`, undefined, { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model })
+          sseWrite(res, 'message', msg)
+        }
+      }))
     } else if (mode === 'bidding') {
       const biddingModePrompt = (cfg.bidding_prompt as string) || '请针对用户的问题提交你的最佳方案。要有创意，要具体，要有说服力。'
-      const systemMsg = await saveMessage(session_id, 'system', null, 'system', null,
-        `🏆 竞标模式开始 — ${validAIs.length} 个 AI 同时提交方案`)
+      const systemMsg = await saveMessage(session_id, 'system', null, 'system', null, `🏆 竞标模式开始 — ${validAIs.length} 个 AI 同时提交方案`)
       sseWrite(res, 'message', systemMsg)
-      for (const ai of activeAIs) {
-        sseWrite(res, 'thinking', { ai_id: ai.id, ai_name: ai.name, ai_avatar: ai.avatar })
-      }
-      await Promise.allSettled(
-        activeAIs.map(async (ai) => {
-          try {
-            const reply = await callAI({
-              provider: ai.provider, model: ai.model, apiKey: ai.apiKey, baseUrl: ai.baseUrl,
-              messages: [{ role: 'user', content }],
-              systemPrompt: buildSystemPrompt(ai.baseSystemPrompt, biddingModePrompt),
-              maxTokens: (cfg.max_tokens as number) || 1000,
-              temperature: (cfg.temperature as number) || 0.9,
-            })
-            const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, reply, '竞标方案',
-              { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model })
-            sseWrite(res, 'message', msg)
-          } catch (err) {
-            const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, `❌ 调用失败`, '竞标方案',
-              { model: ai.model })
-            sseWrite(res, 'message', msg)
-          }
-        })
-      )
+      for (const ai of activeAIs) sseWrite(res, 'thinking', { ai_id: ai.id, ai_name: ai.name, ai_avatar: ai.avatar })
+      await Promise.allSettled(activeAIs.map(async (ai) => {
+        try {
+          const reply = await callAI({ provider: ai.provider, model: ai.model, apiKey: ai.apiKey, baseUrl: ai.baseUrl, messages: [{ role: 'user', content }], systemPrompt: buildSystemPrompt(ai.baseSystemPrompt, biddingModePrompt), maxTokens: (cfg.max_tokens as number) || 1000, temperature: (cfg.temperature as number) || 0.9 })
+          const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, reply, '竞标方案', { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model })
+          sseWrite(res, 'message', msg)
+        } catch (err) {
+          const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, `❌ 调用失败`, '竞标方案', { model: ai.model })
+          sseWrite(res, 'message', msg)
+        }
+      }))
       const endMsg = await saveMessage(session_id, 'system', null, 'system', null, '✅ 所有方案已提交')
       sseWrite(res, 'message', endMsg)
-
     } else if (mode === 'shadow') {
       const actorModePrompt = (cfg.actor_prompt as string) || '请直接完成用户的任务，给出最好的答案。'
       const shadowModePrompt = (cfg.shadow_prompt as string) || '你是审查员。请仔细审查以下回答，找出逻辑漏洞、潜在风险或可改进之处。'
-      const actor = validAIs[0]
-      const shadow = validAIs[1] || validAIs[0]
-      const systemMsg = await saveMessage(session_id, 'system', null, 'system', null,
-        `👤 执行者: ${actor.name}  |  👁 影子审查: ${shadow.name}`)
+      const actor = validAIs[0]; const shadow = validAIs[1] || validAIs[0]
+      const systemMsg = await saveMessage(session_id, 'system', null, 'system', null, `👤 执行者: ${actor.name}  |  👁 影子审查: ${shadow.name}`)
       sseWrite(res, 'message', systemMsg)
       sseWrite(res, 'thinking', { ai_id: actor.id, ai_name: actor.name, ai_avatar: actor.avatar })
-      const actorReply = await callAI({
-        provider: actor.provider, model: actor.model, apiKey: actor.apiKey, baseUrl: actor.baseUrl,
-        messages: historyMessages, systemPrompt: buildSystemPrompt(actor.baseSystemPrompt, actorModePrompt),
-        maxTokens: (cfg.max_tokens_actor as number) || 1000,
-      })
-      const actorMsg = await saveMessage(session_id, 'ai', actor.id, actor.name, actor.avatar, actorReply, '执行者',
-        { model: actor.model })
+      const actorReply = await callAI({ provider: actor.provider, model: actor.model, apiKey: actor.apiKey, baseUrl: actor.baseUrl, messages: historyMessages, systemPrompt: buildSystemPrompt(actor.baseSystemPrompt, actorModePrompt), maxTokens: (cfg.max_tokens_actor as number) || 1000 })
+      const actorMsg = await saveMessage(session_id, 'ai', actor.id, actor.name, actor.avatar, actorReply, '执行者', { model: actor.model })
       sseWrite(res, 'message', actorMsg)
       sseWrite(res, 'thinking', { ai_id: shadow.id, ai_name: shadow.name, ai_avatar: shadow.avatar })
-      const shadowReply = await callAI({
-        provider: shadow.provider, model: shadow.model, apiKey: shadow.apiKey, baseUrl: shadow.baseUrl,
-        messages: [{ role: 'user', content: `原始问题：${content}` }],
-        systemPrompt: buildSystemPrompt(shadow.baseSystemPrompt, `${shadowModePrompt}\n\n【执行者的回答】\n${actorReply}`),
-        maxTokens: (cfg.max_tokens_shadow as number) || 600,
-      })
-      const shadowMsg = await saveMessage(session_id, 'ai', shadow.id, shadow.name, shadow.avatar, shadowReply, '影子审查',
-        { model: shadow.model })
+      const shadowReply = await callAI({ provider: shadow.provider, model: shadow.model, apiKey: shadow.apiKey, baseUrl: shadow.baseUrl, messages: [{ role: 'user', content: `原始问题：${content}` }], systemPrompt: buildSystemPrompt(shadow.baseSystemPrompt, `${shadowModePrompt}\n\n【执行者的回答】\n${actorReply}`), maxTokens: (cfg.max_tokens_shadow as number) || 600 })
+      const shadowMsg = await saveMessage(session_id, 'ai', shadow.id, shadow.name, shadow.avatar, shadowReply, '影子审查', { model: shadow.model })
       sseWrite(res, 'message', shadowMsg)
-
     } else if (mode === 'judge') {
       const judgeModePrompt = (cfg.judge_prompt as string) || '你是主审官，请综合以下专家意见，给出最终裁决和理由。'
       const dimensions = (cfg.expert_dimensions as string[]) || ['维度一', '维度二', '维度三']
-      const judge = validAIs[0]
-      const experts = validAIs.slice(1)
-      const actualExperts = experts.length > 0 ? experts : validAIs
-      const systemMsg = await saveMessage(session_id, 'system', null, 'system', null,
-        `⚖️ 主审官模式 — 主审官: ${judge.name}，专家团: ${actualExperts.map((e) => e.name).join(', ')}`)
+      const judge = validAIs[0]; const experts = validAIs.slice(1); const actualExperts = experts.length > 0 ? experts : validAIs
+      const systemMsg = await saveMessage(session_id, 'system', null, 'system', null, `⚖️ 主审官模式 — 主审官: ${judge.name}，专家团: ${actualExperts.map((e) => e.name).join(', ')}`)
       sseWrite(res, 'message', systemMsg)
-      for (const ai of actualExperts.slice(0, dimensions.length)) {
-        sseWrite(res, 'thinking', { ai_id: ai.id, ai_name: ai.name, ai_avatar: ai.avatar })
-      }
+      for (const ai of actualExperts.slice(0, dimensions.length)) sseWrite(res, 'thinking', { ai_id: ai.id, ai_name: ai.name, ai_avatar: ai.avatar })
       const expertResults: Record<string, string> = {}
-      await Promise.allSettled(
-        actualExperts.slice(0, dimensions.length).map(async (ai, idx) => {
-          const expertModePrompt = (cfg[`expert_${idx + 1}_prompt`] as string)
-            || `你正在作为「${dimensions[idx] || `专家${idx + 1}`}」领域的专家参与讨论。请从 ${dimensions[idx]} 角度深入分析用户的问题。`
-          try {
-            const reply = await callAI({
-              provider: ai.provider, model: ai.model, apiKey: ai.apiKey, baseUrl: ai.baseUrl,
-              messages: [{ role: 'user', content }],
-              systemPrompt: buildSystemPrompt(ai.baseSystemPrompt, expertModePrompt),
-              maxTokens: (cfg.max_tokens_per_expert as number) || 800,
-            })
-            expertResults[ai.id] = reply
-            const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, reply,
-              `专家·${dimensions[idx] || idx + 1}`,
-              { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model })
-            sseWrite(res, 'message', msg)
-          } catch (err) {
-            expertResults[ai.id] = '分析失败'
-            const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, '分析失败',
-              `专家·${dimensions[idx] || idx + 1}`, { model: ai.model })
-            sseWrite(res, 'message', msg)
-          }
-        })
-      )
-      const expertsReport = actualExperts.slice(0, dimensions.length)
-        .map((ai, i) => `\n\n【${dimensions[i] || `专家${i + 1}`} 分析】(${ai.name}):\n${expertResults[ai.id] || '无'}`)
-        .join('')
+      await Promise.allSettled(actualExperts.slice(0, dimensions.length).map(async (ai, idx) => {
+        const expertModePrompt = (cfg[`expert_${idx + 1}_prompt`] as string) || `你正在作为「${dimensions[idx] || `专家${idx + 1}`}」领域的专家参与讨论。请从 ${dimensions[idx]} 角度深入分析用户的问题。`
+        try {
+          const reply = await callAI({ provider: ai.provider, model: ai.model, apiKey: ai.apiKey, baseUrl: ai.baseUrl, messages: [{ role: 'user', content }], systemPrompt: buildSystemPrompt(ai.baseSystemPrompt, expertModePrompt), maxTokens: (cfg.max_tokens_per_expert as number) || 800 })
+          expertResults[ai.id] = reply
+          const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, reply, `专家·${dimensions[idx] || idx + 1}`, { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model })
+          sseWrite(res, 'message', msg)
+        } catch (err) {
+          expertResults[ai.id] = '分析失败'
+          const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, '分析失败', `专家·${dimensions[idx] || idx + 1}`, { model: ai.model })
+          sseWrite(res, 'message', msg)
+        }
+      }))
+      const expertsReport = actualExperts.slice(0, dimensions.length).map((ai, i) => `\n\n【${dimensions[i] || `专家${i + 1}`} 分析】(${ai.name}):\n${expertResults[ai.id] || '无'}`).join('')
       sseWrite(res, 'thinking', { ai_id: judge.id, ai_name: judge.name, ai_avatar: judge.avatar })
-      const judgeReply = await callAI({
-        provider: judge.provider, model: judge.model, apiKey: judge.apiKey, baseUrl: judge.baseUrl,
-        messages: [{ role: 'user', content: `${judgeModePrompt}\n\n【原始问题】\n${content}${expertsReport}` }],
-        systemPrompt: buildSystemPrompt(judge.baseSystemPrompt, '你是最终裁决者，请整合所有专家意见，做出明确的最终判断和建议。'),
-        maxTokens: (cfg.max_tokens_judge as number) || 1200,
-      })
-      const judgeMsg = await saveMessage(session_id, 'ai', judge.id, `${judge.name} (主审官)`, judge.avatar,
-        judgeReply, '主审官·最终裁决', { model: judge.model })
+      const judgeReply = await callAI({ provider: judge.provider, model: judge.model, apiKey: judge.apiKey, baseUrl: judge.baseUrl, messages: [{ role: 'user', content: `${judgeModePrompt}\n\n【原始问题】\n${content}${expertsReport}` }], systemPrompt: buildSystemPrompt(judge.baseSystemPrompt, '你是最终裁决者，请整合所有专家意见，做出明确的最终判断和建议。'), maxTokens: (cfg.max_tokens_judge as number) || 1200 })
+      const judgeMsg = await saveMessage(session_id, 'ai', judge.id, `${judge.name} (主审官)`, judge.avatar, judgeReply, '主审官·最终裁决', { model: judge.model })
       sseWrite(res, 'message', judgeMsg)
-
     } else if (mode === 'rollcall') {
       const selectorModePrompt = (cfg.selector_prompt as string) || '根据用户的问题，从专家库中选出最合适的1-3位专家（用逗号分隔编号），只返回编号列表，如 "1,3"。'
       const expertReplyModePrompt = (cfg.expert_reply_prompt as string) || ''
       const selector = validAIs[0]
       const expertList = validAIs.map((ai, i) => `${i + 1}. ${ai.name} (${ai.model})`).join('\n')
-      const selected = await callAI({
-        provider: selector.provider, model: selector.model, apiKey: selector.apiKey, baseUrl: selector.baseUrl,
-        messages: [{ role: 'user', content: `${selectorModePrompt}\n\n专家库:\n${expertList}\n\n用户问题: ${content}` }],
-        maxTokens: 50,
-      })
-      const indices = selected.match(/\d+/g)
-        ?.map((n) => parseInt(n) - 1)
-        ?.filter((i) => i >= 0 && i < validAIs.length)
-        ?.slice(0, (cfg.max_experts as number) || 3) || [0]
+      const selected = await callAI({ provider: selector.provider, model: selector.model, apiKey: selector.apiKey, baseUrl: selector.baseUrl, messages: [{ role: 'user', content: `${selectorModePrompt}\n\n专家库:\n${expertList}\n\n用户问题: ${content}` }], maxTokens: 50 })
+      const indices = selected.match(/\d+/g)?.map((n) => parseInt(n) - 1)?.filter((i) => i >= 0 && i < validAIs.length)?.slice(0, (cfg.max_experts as number) || 3) || [0]
       const selectedExperts = indices.map((i) => validAIs[i]).filter(Boolean)
-      const systemMsg = await saveMessage(session_id, 'system', null, 'system', null,
-        `📋 点名模式 — 已调用: ${selectedExperts.map((e) => e.name).join(', ')}`)
+      const systemMsg = await saveMessage(session_id, 'system', null, 'system', null, `📋 点名模式 — 已调用: ${selectedExperts.map((e) => e.name).join(', ')}`)
       sseWrite(res, 'message', systemMsg)
-      for (const ai of selectedExperts) {
-        sseWrite(res, 'thinking', { ai_id: ai.id, ai_name: ai.name, ai_avatar: ai.avatar })
-      }
-      await Promise.allSettled(
-        selectedExperts.map(async (ai) => {
-          try {
-            const reply = await callAI({
-              provider: ai.provider, model: ai.model, apiKey: ai.apiKey, baseUrl: ai.baseUrl,
-              messages: historyMessages,
-              systemPrompt: buildSystemPrompt(ai.baseSystemPrompt, expertReplyModePrompt),
-              maxTokens: (cfg.max_tokens as number) || 800,
-            })
-            const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, reply, '专家发言',
-              { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model })
-            sseWrite(res, 'message', msg)
-          } catch (err) {
-            const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar,
-              `❌ 调用失败: ${(err as Error).message}`, '专家发言', { model: ai.model })
-            sseWrite(res, 'message', msg)
-          }
-        })
-      )
-
+      for (const ai of selectedExperts) sseWrite(res, 'thinking', { ai_id: ai.id, ai_name: ai.name, ai_avatar: ai.avatar })
+      await Promise.allSettled(selectedExperts.map(async (ai) => {
+        try {
+          const reply = await callAI({ provider: ai.provider, model: ai.model, apiKey: ai.apiKey, baseUrl: ai.baseUrl, messages: historyMessages, systemPrompt: buildSystemPrompt(ai.baseSystemPrompt, expertReplyModePrompt), maxTokens: (cfg.max_tokens as number) || 800 })
+          const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, reply, '专家发言', { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model })
+          sseWrite(res, 'message', msg)
+        } catch (err) {
+          const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, `❌ 调用失败: ${(err as Error).message}`, '专家发言', { model: ai.model })
+          sseWrite(res, 'message', msg)
+        }
+      }))
     } else {
       const defaultModePrompt = (cfg.default_prompt as string) || ''
-      for (const ai of activeAIs) {
-        sseWrite(res, 'thinking', { ai_id: ai.id, ai_name: ai.name, ai_avatar: ai.avatar })
-      }
-      await Promise.allSettled(
-        activeAIs.map(async (ai) => {
-          try {
-            const reply = await callAI({
-              provider: ai.provider, model: ai.model, apiKey: ai.apiKey, baseUrl: ai.baseUrl,
-              messages: historyMessages,
-              systemPrompt: buildSystemPrompt(ai.baseSystemPrompt, defaultModePrompt),
-              maxTokens: (cfg.max_tokens as number) || 1500,
-              temperature: (cfg.temperature as number) || 0.7,
-            })
-            const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, reply, undefined,
-              { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model })
-            sseWrite(res, 'message', msg)
-          } catch (err) {
-            const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar,
-              `❌ 调用失败: ${(err as Error).message}`, undefined, { model: ai.model })
-            sseWrite(res, 'message', msg)
-          }
-        })
-      )
+      for (const ai of activeAIs) sseWrite(res, 'thinking', { ai_id: ai.id, ai_name: ai.name, ai_avatar: ai.avatar })
+      await Promise.allSettled(activeAIs.map(async (ai) => {
+        try {
+          const reply = await callAI({ provider: ai.provider, model: ai.model, apiKey: ai.apiKey, baseUrl: ai.baseUrl, messages: historyMessages, systemPrompt: buildSystemPrompt(ai.baseSystemPrompt, defaultModePrompt), maxTokens: (cfg.max_tokens as number) || 1500, temperature: (cfg.temperature as number) || 0.7 })
+          const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, reply, undefined, { model: ai.model, display_model: ai.model.startsWith('ep-') ? ai.name : ai.model })
+          sseWrite(res, 'message', msg)
+        } catch (err) {
+          const msg = await saveMessage(session_id, 'ai', ai.id, ai.name, ai.avatar, `❌ 调用失败: ${(err as Error).message}`, undefined, { model: ai.model })
+          sseWrite(res, 'message', msg)
+        }
+      }))
     }
 
     if (localAIs.length > 0) {
-      sseWrite(res, 'local_ai_calls', localAIs.map(ai => ({
-        id: ai.id, name: ai.name, avatar: ai.avatar,
-        model: ai.model, base_url: ai.baseUrl || 'http://localhost:11434',
-        system_prompt: ai.baseSystemPrompt,
-      })))
+      sseWrite(res, 'local_ai_calls', localAIs.map(ai => ({ id: ai.id, name: ai.name, avatar: ai.avatar, model: ai.model, base_url: ai.baseUrl || 'http://localhost:11434', system_prompt: ai.baseSystemPrompt })))
     }
-
   } catch (err) {
     console.error('Chat send error:', err)
-    const errMsg = await saveMessage(session_id, 'system', null, 'system', null,
-      `❌ 发生错误: ${(err as Error).message}`)
+    const errMsg = await saveMessage(session_id, 'system', null, 'system', null, `❌ 发生错误: ${(err as Error).message}`)
     sseWrite(res, 'message', errMsg)
   }
 
