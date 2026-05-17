@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import { Send, Settings2, Users, Zap, Crown, Target, Eye, Radio, UserPlus, MessageCircle, StopCircle } from 'lucide-react'
+import { Send, Settings2, Zap, Crown, Target, Eye, Radio, MessageCircle, StopCircle, ThumbsUp, ThumbsDown, UserPlus } from 'lucide-react'
 import TextareaAutosize from 'react-textarea-autosize'
 import { useChatStore, discussionState } from '@/lib/chat'
 import type { ChatMessage, ChatMode, AIMember } from '@/types'
+import { getTitleInfo } from '@/types'
 import { apiRequest } from '@/lib/auth'
 import toast from 'react-hot-toast'
 import UserAIModal from '@/components/members/UserAIModal'
@@ -22,21 +23,24 @@ interface DynamicMode {
 }
 
 export default function ChatArea() {
-  const { currentSession, messages, isSending, activeMode, selectedAIIds, setActiveMode, toggleAIMember, sendMessage, createSession, setCurrentSession } = useChatStore()
+  const {
+    currentSession, messages, isSending, activeMode, selectedAIIds,
+    setActiveMode, toggleAIMember, sendMessage, createSession, setCurrentSession,
+    reputationScores, loadReputationScores, reactToMessage,
+  } = useChatStore()
   const [input, setInput] = useState('')
   const [aiMembers, setAiMembers] = useState<AIMember[]>([])
   const [modes, setModes] = useState<DynamicMode[]>([])
   const [showModeMenu, setShowModeMenu] = useState(false)
-  const [showMemberMenu, setShowMemberMenu] = useState(false)
   const [showUserAIModal, setShowUserAIModal] = useState(false)
   const [mentionedIds, setMentionedIds] = useState<string[]>([])
   const [showMentionMenu, setShowMentionMenu] = useState(false)
   const [mentionQuery, setMentionQuery] = useState('')
   const [isDiscussionRunning, setIsDiscussionRunning] = useState(false)
+  const [reactingIds, setReactingIds] = useState<Set<string>>(new Set())
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
-  // 监听讨论状态
   useEffect(() => {
     const interval = setInterval(() => {
       setIsDiscussionRunning(discussionState.isRunning)
@@ -68,7 +72,12 @@ export default function ChatArea() {
     })
   }
 
-  useEffect(() => { loadMembers(); loadModes() }, [])
+  useEffect(() => {
+    loadMembers()
+    loadModes()
+    loadReputationScores()
+  }, [])
+
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
   const handleStopDiscussion = () => {
@@ -142,6 +151,18 @@ export default function ChatArea() {
     inputRef.current?.focus()
   }
 
+  const handleReact = async (messageId: string, reaction: 'up' | 'down') => {
+    if (reactingIds.has(messageId)) return
+    setReactingIds(prev => new Set(prev).add(messageId))
+    try {
+      await reactToMessage(messageId, reaction)
+      // 刷新积分
+      await loadReputationScores()
+    } finally {
+      setReactingIds(prev => { const s = new Set(prev); s.delete(messageId); return s })
+    }
+  }
+
   const mentionFilteredMembers = aiMembers.filter((m) =>
     m.is_enabled && (mentionQuery === '' || (m.custom_name || m.name).toLowerCase().includes(mentionQuery.toLowerCase()))
   )
@@ -153,166 +174,163 @@ export default function ChatArea() {
 
   if (!currentSession) {
     return (
-      <div className="chat-area">
-        <div className="empty-state">
-          <div style={{ fontSize: 48 }}>💬</div>
-          <div style={{ fontSize: 16, fontWeight: 500, color: 'var(--text-secondary)' }}>选择或新建一个对话</div>
-          <p style={{ fontSize: 13, color: 'var(--text-muted)', textAlign: 'center', maxWidth: 280 }}>
-            {modes.length > 0
-              ? `支持 ${modes.length} 种对话模式`
-              : '支持多种对话模式'}
-          </p>
-          <button className="btn btn-primary" onClick={async () => {
-            const session = await createSession('normal')
-            setCurrentSession(session)
-          }}>
-            <Zap size={14} /> 开始新对话
-          </button>
+      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+        <div className="chat-area" style={{ flex: 1 }}>
+          <div className="empty-state">
+            <div style={{ fontSize: 48 }}>💬</div>
+            <div style={{ fontSize: 16, fontWeight: 500, color: 'var(--text-secondary)' }}>选择或新建一个对话</div>
+            <p style={{ fontSize: 13, color: 'var(--text-muted)', textAlign: 'center', maxWidth: 280 }}>
+              {modes.length > 0 ? `支持 ${modes.length} 种对话模式` : '支持多种对话模式'}
+            </p>
+            <button className="btn btn-primary" onClick={async () => {
+              const session = await createSession('normal')
+              setCurrentSession(session)
+            }}>
+              <Zap size={14} /> 开始新对话
+            </button>
+          </div>
         </div>
+        <RightSidebar
+          aiMembers={aiMembers}
+          selectedAIIds={selectedAIIds}
+          mentionedIds={mentionedIds}
+          reputationScores={reputationScores}
+          onToggleMention={(id) => {
+            if (mentionedIds.includes(id)) setMentionedIds(mentionedIds.filter(x => x !== id))
+            else setMentionedIds([...mentionedIds, id])
+          }}
+          onManage={() => setShowUserAIModal(true)}
+        />
+        {showUserAIModal && <UserAIModal onClose={() => setShowUserAIModal(false)} onSaved={loadMembers} />}
       </div>
     )
   }
 
   return (
-    <div className="chat-area">
-      <div className="chat-header">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <h2 style={{ fontSize: 15, fontWeight: 600 }}>{currentSession.title}</h2>
-          <span className={`mode-badge ${activeMode}`}>
-            <ActiveModeIcon size={11} />
-            {activeModeInfo?.mode_name || activeMode}
-          </span>
-          {/* 讨论进行中状态 */}
-          {isDiscussionRunning && (
-            <span style={{ fontSize: 11, color: '#38bdf8', display: 'flex', alignItems: 'center', gap: 4 }}>
-              <span className="spinner" style={{ width: 10, height: 10, borderWidth: 1.5 }} />
-              讨论进行中
+    <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+      <div className="chat-area" style={{ flex: 1, minWidth: 0 }}>
+        {/* 顶栏 */}
+        <div className="chat-header">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <h2 style={{ fontSize: 15, fontWeight: 600 }}>{currentSession.title}</h2>
+            <span className={`mode-badge ${activeMode}`}>
+              <ActiveModeIcon size={11} />
+              {activeModeInfo?.mode_name || activeMode}
             </span>
-          )}
-        </div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          {/* 停止讨论按钮 */}
-          {isDiscussionRunning && (
-            <button
-              className="btn btn-danger"
-              style={{ gap: 6, fontSize: 13 }}
-              onClick={handleStopDiscussion}
-            >
-              <StopCircle size={14} /> 停止讨论
-            </button>
-          )}
-          <div style={{ position: 'relative' }}>
-            <button className="btn btn-ghost" style={{ gap: 6, fontSize: 13 }}
-              onClick={() => { setShowMemberMenu(!showMemberMenu); setShowModeMenu(false) }}>
-              <Users size={14} /> 成员 ({new Set(selectedAIIds.map(id => id.replace(':user', ''))).size})
-            </button>
-            {showMemberMenu && (
-              <MemberDropdown members={aiMembers} selected={selectedAIIds} onToggle={toggleAIMember}
-                onClose={() => setShowMemberMenu(false)}
-                onManage={() => { setShowMemberMenu(false); setShowUserAIModal(true) }} />
+            {isDiscussionRunning && (
+              <span style={{ fontSize: 11, color: '#38bdf8', display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span className="spinner" style={{ width: 10, height: 10, borderWidth: 1.5 }} />
+                讨论进行中
+              </span>
             )}
           </div>
-          <div style={{ position: 'relative' }}>
-            <button className="btn btn-ghost" style={{ gap: 6, fontSize: 13 }}
-              onClick={() => { setShowModeMenu(!showModeMenu); setShowMemberMenu(false) }}>
-              <Settings2 size={14} /> 模式
-            </button>
-            {showModeMenu && (
-              <ModeDropdown modes={modes} activeMode={activeMode}
-                onSelect={(mode) => { setActiveMode(mode as ChatMode); setShowModeMenu(false) }}
-                onClose={() => setShowModeMenu(false)} />
+          <div style={{ display: 'flex', gap: 8 }}>
+            {isDiscussionRunning && (
+              <button className="btn btn-danger" style={{ gap: 6, fontSize: 13 }} onClick={handleStopDiscussion}>
+                <StopCircle size={14} /> 停止讨论
+              </button>
             )}
-          </div>
-        </div>
-      </div>
-
-      <div className="messages-container">
-        {messages.length === 0 && (
-          <div className="empty-state" style={{ flex: 1 }}>
-            <p style={{ fontSize: 13 }}>
-              {isDiscussionMode
-                ? '发送消息启动讨论，AI 们会自动轮流发言，你可以随时点「停止讨论」'
-                : '发送消息开始对话'}
-            </p>
-          </div>
-        )}
-        {messages.map((msg) => <MessageRow key={msg.id} message={msg} />)}
-        <div ref={bottomRef} />
-      </div>
-
-      <div className="input-area">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, flexWrap: 'wrap', minHeight: 28 }}>
-          <span style={{ fontSize: 11, color: 'var(--text-muted)', flexShrink: 0 }}>@:</span>
-          <div onClick={() => setMentionedIds([])}
-            style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '3px 10px', borderRadius: 20, fontSize: 12, cursor: 'pointer', background: mentionedIds.length === 0 ? 'var(--accent-glow)' : 'var(--bg-input)', color: mentionedIds.length === 0 ? 'var(--accent-hover)' : 'var(--text-muted)', border: `1px solid ${mentionedIds.length === 0 ? 'rgba(99,102,241,0.4)' : 'var(--border)'}`, transition: 'all 0.15s' }}>
-            👥 所有人
-          </div>
-          {aiMembers.filter((m) => selectedAIIds.includes(m.id) || selectedAIIds.includes(`${m.id}:user`)).map((m) => {
-            const isSelected = mentionedIds.includes(m.id)
-            return (
-              <div key={m.id}
-                onClick={() => {
-                  if (isSelected) setMentionedIds(mentionedIds.filter(id => id !== m.id))
-                  else setMentionedIds([...mentionedIds, m.id])
-                }}
-                style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '3px 10px', borderRadius: 20, fontSize: 12, cursor: 'pointer', background: isSelected ? 'rgba(99,102,241,0.15)' : 'var(--bg-input)', color: isSelected ? 'var(--accent-hover)' : 'var(--text-secondary)', border: `1px solid ${isSelected ? 'rgba(99,102,241,0.4)' : 'var(--border)'}`, transition: 'all 0.15s' }}>
-                <span>{m.custom_avatar || m.avatar}</span>
-                {m.custom_name || m.name}
-                {isSelected && <span style={{ fontSize: 10, marginLeft: 2 }}>✓</span>}
-              </div>
-            )
-          })}
-        </div>
-
-        {showMentionMenu && (
-          <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 6, marginBottom: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.3)' }}>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '2px 8px 6px', fontWeight: 500 }}>@ 提及</div>
-            <div onClick={() => handleMention(null)}
-              style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 6, cursor: 'pointer', fontSize: 13 }}
-              onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-hover)')}
-              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}>
-              <span style={{ fontSize: 16 }}>👥</span> 所有人（默认）
+            <div style={{ position: 'relative' }}>
+              <button className="btn btn-ghost" style={{ gap: 6, fontSize: 13 }}
+                onClick={() => { setShowModeMenu(!showModeMenu) }}>
+                <Settings2 size={14} /> 模式
+              </button>
+              {showModeMenu && (
+                <ModeDropdown modes={modes} activeMode={activeMode}
+                  onSelect={(mode) => { setActiveMode(mode as ChatMode); setShowModeMenu(false) }}
+                  onClose={() => setShowModeMenu(false)} />
+              )}
             </div>
-            {mentionFilteredMembers.map((m) => (
-              <div key={m.id} onClick={() => handleMention(m)}
+          </div>
+        </div>
+
+        {/* 消息区 */}
+        <div className="messages-container">
+          {messages.length === 0 && (
+            <div className="empty-state" style={{ flex: 1 }}>
+              <p style={{ fontSize: 13 }}>
+                {isDiscussionMode
+                  ? '发送消息启动讨论，AI 们会自动轮流发言，你可以随时点「停止讨论」'
+                  : '发送消息开始对话'}
+              </p>
+            </div>
+          )}
+          {messages.map((msg) => (
+            <MessageRow
+              key={msg.id}
+              message={msg}
+              onReact={handleReact}
+              isReacting={reactingIds.has(msg.id)}
+            />
+          ))}
+          <div ref={bottomRef} />
+        </div>
+
+        {/* 输入区 */}
+        <div className="input-area">
+          {showMentionMenu && (
+            <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 6, marginBottom: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.3)' }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '2px 8px 6px', fontWeight: 500 }}>@ 提及</div>
+              <div onClick={() => handleMention(null)}
                 style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 6, cursor: 'pointer', fontSize: 13 }}
                 onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-hover)')}
                 onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}>
-                <span style={{ fontSize: 16 }}>{m.custom_avatar || m.avatar}</span>
-                {m.custom_name || m.name}
+                <span style={{ fontSize: 16 }}>👥</span> 所有人（默认）
               </div>
-            ))}
-          </div>
-        )}
+              {mentionFilteredMembers.map((m) => (
+                <div key={m.id} onClick={() => handleMention(m)}
+                  style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 6, cursor: 'pointer', fontSize: 13 }}
+                  onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-hover)')}
+                  onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}>
+                  <span style={{ fontSize: 16 }}>{m.custom_avatar || m.avatar}</span>
+                  {m.custom_name || m.name}
+                </div>
+              ))}
+            </div>
+          )}
 
-        <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end' }}>
-          <TextareaAutosize
-            ref={inputRef}
-            className="input-box"
-            placeholder={isDiscussionRunning
-              ? '讨论进行中，可点右上角「停止讨论」...'
-              : isDiscussionMode
-                ? '发送消息启动讨论... (Ctrl+Enter 发送)'
-                : '发送消息... (Ctrl+Enter 发送，Enter 换行，@ 提及成员)'}
-            value={input}
-            onChange={(e) => handleInputChange(e.target.value)}
-            onKeyDown={handleKeyDown}
-            minRows={1}
-            maxRows={6}
-            disabled={isSending || isDiscussionRunning}
-          />
-          <button className="btn btn-primary" onClick={handleSend}
-            disabled={!input.trim() || isSending || isDiscussionRunning}
-            style={{ padding: '10px 16px', flexShrink: 0 }} title="发送 (Ctrl+Enter)">
-            {isSending ? <span className="spinner" /> : <Send size={16} />}
-          </button>
-        </div>
-        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6, textAlign: 'right' }}>
-          {isDiscussionRunning
-            ? '讨论进行中 · 点右上角「停止讨论」可随时停止'
-            : 'Ctrl+Enter 发送 · Enter 换行 · @ 提及成员'}
+          <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end' }}>
+            <TextareaAutosize
+              ref={inputRef}
+              className="input-box"
+              placeholder={isDiscussionRunning
+                ? '讨论进行中，可点右上角「停止讨论」...'
+                : isDiscussionMode
+                  ? '发送消息启动讨论... (Ctrl+Enter 发送)'
+                  : '发送消息... (Ctrl+Enter 发送，Enter 换行，@ 提及成员)'}
+              value={input}
+              onChange={(e) => handleInputChange(e.target.value)}
+              onKeyDown={handleKeyDown}
+              minRows={1}
+              maxRows={6}
+              disabled={isSending || isDiscussionRunning}
+            />
+            <button className="btn btn-primary" onClick={handleSend}
+              disabled={!input.trim() || isSending || isDiscussionRunning}
+              style={{ padding: '10px 16px', flexShrink: 0 }} title="发送 (Ctrl+Enter)">
+              {isSending ? <span className="spinner" /> : <Send size={16} />}
+            </button>
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6, textAlign: 'right' }}>
+            {isDiscussionRunning
+              ? '讨论进行中 · 点右上角「停止讨论」可随时停止'
+              : 'Ctrl+Enter 发送 · Enter 换行 · @ 提及成员'}
+          </div>
         </div>
       </div>
+
+      {/* 右侧爵位成员栏 */}
+      <RightSidebar
+        aiMembers={aiMembers}
+        selectedAIIds={selectedAIIds}
+        mentionedIds={mentionedIds}
+        reputationScores={reputationScores}
+        onToggleMention={(id) => {
+          if (mentionedIds.includes(id)) setMentionedIds(mentionedIds.filter(x => x !== id))
+          else setMentionedIds([...mentionedIds, id])
+        }}
+        onManage={() => setShowUserAIModal(true)}
+      />
 
       {showUserAIModal && (
         <UserAIModal onClose={() => setShowUserAIModal(false)} onSaved={loadMembers} />
@@ -321,7 +339,173 @@ export default function ChatArea() {
   )
 }
 
-function MessageRow({ message }: { message: ChatMessage }) {
+// ---- 右侧成员侧边栏 ----
+function RightSidebar({
+  aiMembers, selectedAIIds, mentionedIds, reputationScores, onToggleMention, onManage,
+}: {
+  aiMembers: AIMember[]
+  selectedAIIds: string[]
+  mentionedIds: string[]
+  reputationScores: Record<string, number>
+  onToggleMention: (id: string) => void
+  onManage: () => void
+}) {
+  const activeMembers = aiMembers.filter(m =>
+    selectedAIIds.includes(m.id) || selectedAIIds.includes(`${m.id}:user`)
+  )
+
+  return (
+    <div style={{
+      width: 200,
+      flexShrink: 0,
+      background: 'var(--bg-secondary)',
+      borderLeft: '1px solid var(--border)',
+      display: 'flex',
+      flexDirection: 'column',
+      overflow: 'hidden',
+    }}>
+      {/* 标题栏 */}
+      <div style={{
+        padding: '12px 14px 8px',
+        borderBottom: '1px solid var(--border)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+      }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>
+          成员 ({activeMembers.length})
+        </span>
+        <button
+          onClick={onManage}
+          title="管理私人AI"
+          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: 2, display: 'flex', alignItems: 'center' }}
+        >
+          <UserPlus size={13} />
+        </button>
+      </div>
+
+      {/* 说明文字 */}
+      <div style={{ padding: '6px 14px 4px', fontSize: 10, color: 'var(--text-muted)', lineHeight: 1.4 }}>
+        点击成员 = @指定，不选 = @所有人
+      </div>
+
+      {/* 成员列表 */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '4px 8px 8px' }}>
+        {/* 所有人选项 */}
+        <div
+          onClick={() => {
+            // 点击"所有人"清空mentionedIds
+            useChatStore.setState({ selectedAIIds: useChatStore.getState().selectedAIIds })
+            // 通过外部reset逻辑处理：直接emit空数组
+            // 简化：通知父层清空
+            if (mentionedIds.length > 0) {
+              // 全部取消选中 = 回到所有人
+              mentionedIds.forEach(() => {})
+            }
+          }}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 8,
+            padding: '7px 8px', borderRadius: 8, cursor: 'pointer', marginBottom: 2,
+            background: mentionedIds.length === 0 ? 'rgba(99,102,241,0.12)' : 'transparent',
+            border: `1px solid ${mentionedIds.length === 0 ? 'rgba(99,102,241,0.35)' : 'transparent'}`,
+            transition: 'all 0.15s',
+          }}
+        >
+          <span style={{ fontSize: 18, lineHeight: 1 }}>👥</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 12, fontWeight: 500, color: mentionedIds.length === 0 ? 'var(--accent-hover)' : 'var(--text-secondary)' }}>
+              所有人
+            </div>
+            <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>默认</div>
+          </div>
+          {mentionedIds.length === 0 && (
+            <span style={{ fontSize: 10, color: 'var(--accent-hover)' }}>✓</span>
+          )}
+        </div>
+
+        {/* 各AI成员 */}
+        {activeMembers.map((m) => {
+          const score = reputationScores[m.id] ?? 0
+          const titleInfo = getTitleInfo(score)
+          const isSelected = mentionedIds.includes(m.id)
+          return (
+            <div
+              key={m.id}
+              onClick={() => onToggleMention(m.id)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                padding: '7px 8px', borderRadius: 8, cursor: 'pointer', marginBottom: 2,
+                background: isSelected ? 'rgba(99,102,241,0.12)' : 'transparent',
+                border: `1px solid ${isSelected ? 'rgba(99,102,241,0.35)' : 'transparent'}`,
+                transition: 'all 0.15s',
+              }}
+              onMouseEnter={(e) => { if (!isSelected) e.currentTarget.style.background = 'rgba(255,255,255,0.04)' }}
+              onMouseLeave={(e) => { if (!isSelected) e.currentTarget.style.background = 'transparent' }}
+            >
+              {/* 头像 */}
+              <div style={{ position: 'relative', flexShrink: 0 }}>
+                <div style={{
+                  width: 32, height: 32, borderRadius: 8,
+                  background: 'var(--bg-card)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 18, lineHeight: 1,
+                  border: isSelected ? '1px solid rgba(99,102,241,0.5)' : '1px solid var(--border)',
+                }}>
+                  {m.custom_avatar || m.avatar}
+                </div>
+                {/* 在线绿点 */}
+                <div style={{
+                  position: 'absolute', bottom: -1, right: -1,
+                  width: 8, height: 8, borderRadius: '50%',
+                  background: 'var(--green)',
+                  boxShadow: '0 0 4px var(--green)',
+                  border: '1px solid var(--bg-secondary)',
+                }} />
+              </div>
+
+              {/* 名字 + 爵位 */}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{
+                  fontSize: 12, fontWeight: 500,
+                  color: isSelected ? 'var(--accent-hover)' : 'var(--text-primary)',
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                }}>
+                  {m.custom_name || m.name}
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 3, marginTop: 1 }}>
+                  <span style={{ fontSize: 11 }}>{titleInfo.icon}</span>
+                  <span style={{ fontSize: 10, color: titleInfo.color, fontWeight: 500 }}>
+                    {titleInfo.title}
+                  </span>
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                    {score}分
+                  </span>
+                </div>
+              </div>
+
+              {isSelected && (
+                <span style={{ fontSize: 10, color: 'var(--accent-hover)', flexShrink: 0 }}>✓</span>
+              )}
+            </div>
+          )
+        })}
+
+        {activeMembers.length === 0 && (
+          <div style={{ padding: '12px 8px', fontSize: 12, color: 'var(--text-muted)', textAlign: 'center' }}>
+            暂无启用的 AI 成员
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ---- 消息行 ----
+function MessageRow({ message, onReact, isReacting }: {
+  message: ChatMessage
+  onReact: (id: string, reaction: 'up' | 'down') => void
+  isReacting: boolean
+}) {
   if (message.metadata?.thinking) {
     return (
       <div className="message-row ai">
@@ -336,7 +520,10 @@ function MessageRow({ message }: { message: ChatMessage }) {
   if (message.sender_type === 'system') {
     return <div className="message-row system"><div className="bubble system">{message.content}</div></div>
   }
+
   const isUser = message.sender_type === 'user'
+  const isReactionReply = message.metadata?.is_reaction_reply === true
+
   return (
     <div className={`message-row ${isUser ? 'user' : 'ai'} fade-in`}>
       {!isUser && (
@@ -364,41 +551,52 @@ function MessageRow({ message }: { message: ChatMessage }) {
           </div>
         )}
         <div className={`bubble ${isUser ? 'user' : 'ai'}`}>{message.content}</div>
+
+        {/* 👍👎 按钮 — 只在AI普通回复上显示，不在感谢/道歉回复上显示 */}
+        {!isUser && !isReactionReply && !message.metadata?.thinking && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
+            <button
+              onClick={() => onReact(message.id, 'up')}
+              disabled={isReacting}
+              title="点赞 +10分"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 3,
+                background: 'none', border: '1px solid var(--border)',
+                borderRadius: 6, padding: '2px 8px', cursor: isReacting ? 'not-allowed' : 'pointer',
+                fontSize: 11, color: 'var(--text-muted)',
+                transition: 'all 0.15s',
+                opacity: isReacting ? 0.5 : 1,
+              }}
+              onMouseEnter={(e) => { if (!isReacting) { e.currentTarget.style.borderColor = '#10b981'; e.currentTarget.style.color = '#10b981' } }}
+              onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-muted)' }}
+            >
+              <ThumbsUp size={11} /> +10
+            </button>
+            <button
+              onClick={() => onReact(message.id, 'down')}
+              disabled={isReacting}
+              title="不满意 -10分"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 3,
+                background: 'none', border: '1px solid var(--border)',
+                borderRadius: 6, padding: '2px 8px', cursor: isReacting ? 'not-allowed' : 'pointer',
+                fontSize: 11, color: 'var(--text-muted)',
+                transition: 'all 0.15s',
+                opacity: isReacting ? 0.5 : 1,
+              }}
+              onMouseEnter={(e) => { if (!isReacting) { e.currentTarget.style.borderColor = '#ef4444'; e.currentTarget.style.color = '#ef4444' } }}
+              onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-muted)' }}
+            >
+              <ThumbsDown size={11} /> -10
+            </button>
+          </div>
+        )}
+
         <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3, textAlign: isUser ? 'right' : 'left' }}>
           {new Date(message.created_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
         </div>
       </div>
     </div>
-  )
-}
-
-function MemberDropdown({ members, selected, onToggle, onClose, onManage }: {
-  members: AIMember[]; selected: string[]; onToggle: (id: string) => void; onClose: () => void; onManage: () => void
-}) {
-  return (
-    <>
-      <div style={{ position: 'fixed', inset: 0, zIndex: 49 }} onClick={onClose} />
-      <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 6, width: 240, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 12, padding: 8, zIndex: 50, boxShadow: '0 8px 24px rgba(0,0,0,0.4)' }}>
-        <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 8px 8px', fontWeight: 500 }}>选择参与的 AI 成员</div>
-        {members.length === 0 && <div style={{ padding: '8px', fontSize: 12, color: 'var(--text-muted)' }}>暂无可用 AI 成员</div>}
-        {members.map((m) => (
-          <div key={m.id} onClick={() => onToggle(m.type === 'user' ? `${m.id}:user` : m.id)}
-            style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px', borderRadius: 8, cursor: 'pointer', background: (selected.includes(m.id) || selected.includes(`${m.id}:user`)) ? 'var(--accent-glow)' : 'transparent', border: (selected.includes(m.id) || selected.includes(`${m.id}:user`)) ? '1px solid rgba(99,102,241,0.3)' : '1px solid transparent', marginBottom: 2 }}>
-            <div style={{ fontSize: 20 }}>{m.custom_avatar || m.avatar}</div>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 13, fontWeight: 500 }}>{m.custom_name || m.name}</div>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{String(m.model).startsWith('ep-') ? m.name : m.model}</div>
-            </div>
-            <div className={`status-dot ${(selected.includes(m.id) || selected.includes(`${m.id}:user`)) ? 'online' : 'offline'}`} />
-          </div>
-        ))}
-        <div className="divider" style={{ margin: '6px 0' }} />
-        <div onClick={() => { onClose(); onManage() }}
-          style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px', borderRadius: 8, cursor: 'pointer', color: 'var(--accent-hover)', fontSize: 13 }}>
-          <UserPlus size={14} /> 管理私人 AI
-        </div>
-      </div>
-    </>
   )
 }
 
