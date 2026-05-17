@@ -118,31 +118,36 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   // ---- 爵位积分 ----
+  // GET /api/settings?type=reputation
   loadReputationScores: async () => {
     try {
-      const res = await apiRequest('/reputation')
+      const res = await apiRequest('/settings?type=reputation')
       if (!res.ok) return
       const data = await res.json()
       set({ reputationScores: data.scores || {} })
     } catch { /* 静默失败 */ }
   },
 
+  // POST /api/chat/send?action=react
   reactToMessage: async (messageId, reaction) => {
     try {
-      const res = await apiRequest('/chat/react', {
+      const token = useAuthStore.getState().token
+      const res = await fetch('/api/chat/send?action=react', {
         method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({ message_id: messageId, reaction }),
       })
       if (!res.ok) return
       const data = await res.json()
-      // 更新积分
       if (data.new_score !== undefined && data.reply_message?.sender_id) {
         const aiId = data.reply_message.sender_id
         set((state) => ({
           reputationScores: { ...state.reputationScores, [aiId]: data.new_score },
         }))
       }
-      // 把AI的感谢/道歉回复追加到消息列表
       if (data.reply_message) {
         set((state) => ({ messages: [...state.messages, data.reply_message] }))
       }
@@ -251,7 +256,6 @@ async function handleSSESend(
                 messages: state.messages.filter((m: ChatMessage) => !remainingIds.includes(m.id as string)),
               }))
             }
-
             if (discussionConfig) {
               const configToUse = discussionConfig
               discussionConfig = null
@@ -334,22 +338,8 @@ async function runDiscussionPolling(
             ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
           },
           body: JSON.stringify({
-            session_id,
-            content: topic,
-            mode: 'discussion',
-            selected_ai_ids: [],
-            discussion_step: {
-              ai_index: currentAiIndex,
-              round: currentRound,
-              total_rounds,
-              speeches,
-              topic,
-              ai_ids,
-              discussion_prompt,
-              summary_prompt,
-              max_tokens,
-              temperature,
-            },
+            session_id, content: topic, mode: 'discussion', selected_ai_ids: [],
+            discussion_step: { ai_index: currentAiIndex, round: currentRound, total_rounds, speeches, topic, ai_ids, discussion_prompt, summary_prompt, max_tokens, temperature },
           }),
         })
 
@@ -371,7 +361,6 @@ async function runDiscussionPolling(
           const newRound = data.next.round
           currentAiIndex = data.next.ai_index
           currentRound = newRound
-
           if (wasRoundEnd && newRound <= total_rounds && !discussionState.shouldStop) {
             set((state: any) => ({
               messages: [...state.messages, {
@@ -391,9 +380,7 @@ async function runDiscussionPolling(
 
       } catch (err) {
         console.error('Discussion step error:', err)
-        set((state: any) => ({
-          messages: state.messages.filter((m: ChatMessage) => m.id !== thinkingId)
-        }))
+        set((state: any) => ({ messages: state.messages.filter((m: ChatMessage) => m.id !== thinkingId) }))
         currentAiIndex = (currentAiIndex + 1) % ai_ids.length
         if (currentAiIndex === 0) currentRound++
       }
@@ -410,28 +397,11 @@ async function runDiscussionPolling(
           created_at: new Date().toISOString(),
         }]
       }))
-
       try {
         const resp = await fetch('/api/chat/send', {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
-          },
-          body: JSON.stringify({
-            session_id,
-            content: topic,
-            mode: 'discussion',
-            selected_ai_ids: [],
-            discussion_summary: {
-              summary_ai_id: summaryAiId,
-              ai_ids,
-              speeches,
-              topic,
-              summary_prompt,
-              max_tokens: Math.round((max_tokens || 600) * 1.5),
-            },
-          }),
+          headers: { 'Content-Type': 'application/json', ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
+          body: JSON.stringify({ session_id, content: topic, mode: 'discussion', selected_ai_ids: [], discussion_summary: { summary_ai_id: summaryAiId, ai_ids, speeches, topic, summary_prompt, max_tokens: Math.round((max_tokens || 600) * 1.5) } }),
         })
         const data = await resp.json()
         set((state: any) => {
@@ -439,9 +409,7 @@ async function runDiscussionPolling(
           return { messages: data.message ? [...filtered, data.message] : filtered }
         })
       } catch {
-        set((state: any) => ({
-          messages: state.messages.filter((m: ChatMessage) => m.id !== thinkingId)
-        }))
+        set((state: any) => ({ messages: state.messages.filter((m: ChatMessage) => m.id !== thinkingId) }))
       }
     }
 
@@ -449,7 +417,6 @@ async function runDiscussionPolling(
     discussionState.isRunning = false
     const wasStopped = discussionState.shouldStop
     discussionState.shouldStop = false
-
     const endMsg: ChatMessage = {
       id: `discussion-end-${Date.now()}`,
       session_id: currentSession.id,
@@ -459,10 +426,7 @@ async function runDiscussionPolling(
     }
     set((state: any) => ({
       isSending: false,
-      messages: [
-        ...state.messages.filter((m: ChatMessage) => !m.metadata?.thinking),
-        endMsg,
-      ],
+      messages: [...state.messages.filter((m: ChatMessage) => !m.metadata?.thinking), endMsg],
     }))
     get().loadSessions()
   }
@@ -484,47 +448,25 @@ async function handleLocalAIs(localAICalls: any[], currentSession: ChatSession, 
       }]
     }))
     try {
-      const reply = await callOllamaLocal({
-        name: localAI.name, avatar: localAI.avatar,
-        model: localAI.model, base_url: localAI.base_url,
-        system_prompt: localAI.system_prompt,
-        messages: sessionMessages,
-      })
+      const reply = await callOllamaLocal({ name: localAI.name, avatar: localAI.avatar, model: localAI.model, base_url: localAI.base_url, system_prompt: localAI.system_prompt, messages: sessionMessages })
       let savedMsg: ChatMessage | null = null
       try {
-        const saveRes = await apiRequest('/chat/save_local', {
-          method: 'POST',
-          body: JSON.stringify({
-            session_id: currentSession.id,
-            sender_id: localAI.id, sender_name: localAI.name,
-            sender_avatar: localAI.avatar, content: reply, model: localAI.model,
-          }),
-        })
+        const saveRes = await apiRequest('/chat/save_local', { method: 'POST', body: JSON.stringify({ session_id: currentSession.id, sender_id: localAI.id, sender_name: localAI.name, sender_avatar: localAI.avatar, content: reply, model: localAI.model }) })
         if (saveRes.ok) { const d = await saveRes.json(); savedMsg = d.message }
       } catch { }
-
       const localMsg: ChatMessage = savedMsg || {
-        id: `local-${localAI.id}-${Date.now()}`,
-        session_id: currentSession.id,
-        sender_type: 'ai', sender_id: localAI.id,
-        sender_name: localAI.name, sender_avatar: localAI.avatar,
-        content: reply, metadata: { model: localAI.model },
-        created_at: new Date().toISOString(),
+        id: `local-${localAI.id}-${Date.now()}`, session_id: currentSession.id,
+        sender_type: 'ai', sender_id: localAI.id, sender_name: localAI.name, sender_avatar: localAI.avatar,
+        content: reply, metadata: { model: localAI.model }, created_at: new Date().toISOString(),
       }
-      set((state: any) => ({
-        messages: [...state.messages.filter((m: ChatMessage) => m.id !== thinkingId), localMsg]
-      }))
+      set((state: any) => ({ messages: [...state.messages.filter((m: ChatMessage) => m.id !== thinkingId), localMsg] }))
     } catch (err) {
       const errMsg: ChatMessage = {
-        id: `local-err-${localAI.id}-${Date.now()}`,
-        session_id: currentSession.id,
+        id: `local-err-${localAI.id}-${Date.now()}`, session_id: currentSession.id,
         sender_type: 'ai', sender_name: localAI.name, sender_avatar: localAI.avatar,
-        content: `❌ 本地模型调用失败: ${(err as Error).message}`,
-        created_at: new Date().toISOString(),
+        content: `❌ 本地模型调用失败: ${(err as Error).message}`, created_at: new Date().toISOString(),
       }
-      set((state: any) => ({
-        messages: [...state.messages.filter((m: ChatMessage) => m.id !== thinkingId), errMsg]
-      }))
+      set((state: any) => ({ messages: [...state.messages.filter((m: ChatMessage) => m.id !== thinkingId), errMsg] }))
     }
   }
 }
