@@ -1,13 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import { Send, Settings2, Users, Zap, Crown, Target, Eye, Radio, UserPlus, MessageCircle } from 'lucide-react'
+import { Send, Settings2, Users, Zap, Crown, Target, Eye, Radio, UserPlus, MessageCircle, StopCircle } from 'lucide-react'
 import TextareaAutosize from 'react-textarea-autosize'
-import { useChatStore } from '@/lib/chat'
+import { useChatStore, discussionState } from '@/lib/chat'
 import type { ChatMessage, ChatMode, AIMember } from '@/types'
 import { apiRequest } from '@/lib/auth'
 import toast from 'react-hot-toast'
 import UserAIModal from '@/components/members/UserAIModal'
 
-// 内置模式的图标和颜色（仅用于显示，不影响功能）
 const BUILTIN_MODE_STYLE: Record<string, { icon: React.ElementType; color: string }> = {
   normal:     { icon: Zap,           color: '#818cf8' },
   judge:      { icon: Crown,         color: '#fbbf24' },
@@ -17,14 +16,9 @@ const BUILTIN_MODE_STYLE: Record<string, { icon: React.ElementType; color: strin
   discussion: { icon: MessageCircle, color: '#38bdf8' },
 }
 
-// 动态模式类型（来自数据库）
 interface DynamicMode {
-  id: string
-  mode_key: string
-  mode_name: string
-  description: string
-  is_enabled: boolean
-  config: Record<string, unknown>
+  id: string; mode_key: string; mode_name: string
+  description: string; is_enabled: boolean; config: Record<string, unknown>
 }
 
 export default function ChatArea() {
@@ -38,8 +32,17 @@ export default function ChatArea() {
   const [mentionedIds, setMentionedIds] = useState<string[]>([])
   const [showMentionMenu, setShowMentionMenu] = useState(false)
   const [mentionQuery, setMentionQuery] = useState('')
+  const [isDiscussionRunning, setIsDiscussionRunning] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+
+  // 监听讨论状态
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setIsDiscussionRunning(discussionState.isRunning)
+    }, 300)
+    return () => clearInterval(interval)
+  }, [])
 
   const loadMembers = () => {
     apiRequest('/members').then(async (res) => {
@@ -56,7 +59,6 @@ export default function ChatArea() {
     })
   }
 
-  // 从数据库加载模式列表
   const loadModes = () => {
     apiRequest('/settings?type=modes').then(async (res) => {
       if (res.ok) {
@@ -69,8 +71,13 @@ export default function ChatArea() {
   useEffect(() => { loadMembers(); loadModes() }, [])
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
+  const handleStopDiscussion = () => {
+    discussionState.shouldStop = true
+    toast('正在停止讨论...', { icon: '⏹' })
+  }
+
   const handleSend = async () => {
-    if (!input.trim() || isSending) return
+    if (!input.trim() || isSending || isDiscussionRunning) return
     let session = currentSession
     if (!session) {
       session = await createSession(activeMode)
@@ -81,10 +88,12 @@ export default function ChatArea() {
     const currentMentionedIds = [...mentionedIds]
     setMentionedIds([])
     if (currentMentionedIds.length > 0) {
-      useChatStore.setState({ selectedAIIds: currentMentionedIds.map(id => {
-        const m = aiMembers.find(m => m.id === id)
-        return m?.type === 'user' ? `${id}:user` : id
-      })})
+      useChatStore.setState({
+        selectedAIIds: currentMentionedIds.map(id => {
+          const m = aiMembers.find(m => m.id === id)
+          return m?.type === 'user' ? `${id}:user` : id
+        })
+      })
     }
     try {
       await sendMessage(text)
@@ -115,11 +124,7 @@ export default function ChatArea() {
     const lastAt = val.lastIndexOf('@')
     if (lastAt >= 0) {
       const afterAt = val.slice(lastAt + 1)
-      if (!afterAt.includes(' ')) {
-        setShowMentionMenu(true)
-        setMentionQuery(afterAt)
-        return
-      }
+      if (!afterAt.includes(' ')) { setShowMentionMenu(true); setMentionQuery(afterAt); return }
     }
     setShowMentionMenu(false)
   }
@@ -127,14 +132,11 @@ export default function ChatArea() {
   const handleMention = (member: AIMember | null) => {
     const lastAt = input.lastIndexOf('@')
     if (member === null) {
-      setInput(input.slice(0, lastAt))
-      setMentionedIds([])
+      setInput(input.slice(0, lastAt)); setMentionedIds([])
     } else {
       const name = member.custom_name || member.name
       setInput(input.slice(0, lastAt) + `@${name} `)
-      if (!mentionedIds.includes(member.id)) {
-        setMentionedIds([...mentionedIds, member.id])
-      }
+      if (!mentionedIds.includes(member.id)) setMentionedIds([...mentionedIds, member.id])
     }
     setShowMentionMenu(false)
     inputRef.current?.focus()
@@ -144,10 +146,10 @@ export default function ChatArea() {
     m.is_enabled && (mentionQuery === '' || (m.custom_name || m.name).toLowerCase().includes(mentionQuery.toLowerCase()))
   )
 
-  // 当前激活模式的信息（从动态列表里找）
   const activeModeInfo = modes.find(m => m.mode_key === activeMode)
   const activeModeStyle = BUILTIN_MODE_STYLE[activeMode] || { icon: MessageCircle, color: '#818cf8' }
   const ActiveModeIcon = activeModeStyle.icon
+  const isDiscussionMode = activeMode === 'discussion' || activeModeInfo?.config?.discussion_mode === true
 
   if (!currentSession) {
     return (
@@ -157,8 +159,8 @@ export default function ChatArea() {
           <div style={{ fontSize: 16, fontWeight: 500, color: 'var(--text-secondary)' }}>选择或新建一个对话</div>
           <p style={{ fontSize: 13, color: 'var(--text-muted)', textAlign: 'center', maxWidth: 280 }}>
             {modes.length > 0
-              ? `支持 ${modes.length} 种对话模式：${modes.slice(0, 3).map(m => m.mode_name).join('、')}等`
-              : '支持普通对话、主审官、竞标、影子、点名等多种模式'}
+              ? `支持 ${modes.length} 种对话模式`
+              : '支持多种对话模式'}
           </p>
           <button className="btn btn-primary" onClick={async () => {
             const session = await createSession('normal')
@@ -180,8 +182,25 @@ export default function ChatArea() {
             <ActiveModeIcon size={11} />
             {activeModeInfo?.mode_name || activeMode}
           </span>
+          {/* 讨论进行中状态 */}
+          {isDiscussionRunning && (
+            <span style={{ fontSize: 11, color: '#38bdf8', display: 'flex', alignItems: 'center', gap: 4 }}>
+              <span className="spinner" style={{ width: 10, height: 10, borderWidth: 1.5 }} />
+              讨论进行中
+            </span>
+          )}
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
+          {/* 停止讨论按钮 */}
+          {isDiscussionRunning && (
+            <button
+              className="btn btn-danger"
+              style={{ gap: 6, fontSize: 13 }}
+              onClick={handleStopDiscussion}
+            >
+              <StopCircle size={14} /> 停止讨论
+            </button>
+          )}
           <div style={{ position: 'relative' }}>
             <button className="btn btn-ghost" style={{ gap: 6, fontSize: 13 }}
               onClick={() => { setShowMemberMenu(!showMemberMenu); setShowModeMenu(false) }}>
@@ -189,7 +208,8 @@ export default function ChatArea() {
             </button>
             {showMemberMenu && (
               <MemberDropdown members={aiMembers} selected={selectedAIIds} onToggle={toggleAIMember}
-                onClose={() => setShowMemberMenu(false)} onManage={() => { setShowMemberMenu(false); setShowUserAIModal(true) }} />
+                onClose={() => setShowMemberMenu(false)}
+                onManage={() => { setShowMemberMenu(false); setShowUserAIModal(true) }} />
             )}
           </div>
           <div style={{ position: 'relative' }}>
@@ -198,12 +218,9 @@ export default function ChatArea() {
               <Settings2 size={14} /> 模式
             </button>
             {showModeMenu && (
-              <ModeDropdown
-                modes={modes}
-                activeMode={activeMode}
+              <ModeDropdown modes={modes} activeMode={activeMode}
                 onSelect={(mode) => { setActiveMode(mode as ChatMode); setShowModeMenu(false) }}
-                onClose={() => setShowModeMenu(false)}
-              />
+                onClose={() => setShowModeMenu(false)} />
             )}
           </div>
         </div>
@@ -212,7 +229,11 @@ export default function ChatArea() {
       <div className="messages-container">
         {messages.length === 0 && (
           <div className="empty-state" style={{ flex: 1 }}>
-            <p style={{ fontSize: 13 }}>发送消息开始对话</p>
+            <p style={{ fontSize: 13 }}>
+              {isDiscussionMode
+                ? '发送消息启动讨论，AI 们会自动轮流发言，你可以随时点「停止讨论」'
+                : '发送消息开始对话'}
+            </p>
           </div>
         )}
         {messages.map((msg) => <MessageRow key={msg.id} message={msg} />)}
@@ -220,13 +241,10 @@ export default function ChatArea() {
       </div>
 
       <div className="input-area">
-        {/* @成员选择器 */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, flexWrap: 'wrap', minHeight: 28 }}>
           <span style={{ fontSize: 11, color: 'var(--text-muted)', flexShrink: 0 }}>@:</span>
-          <div
-            onClick={() => setMentionedIds([])}
-            style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '3px 10px', borderRadius: 20, fontSize: 12, cursor: 'pointer', background: mentionedIds.length === 0 ? 'var(--accent-glow)' : 'var(--bg-input)', color: mentionedIds.length === 0 ? 'var(--accent-hover)' : 'var(--text-muted)', border: `1px solid ${mentionedIds.length === 0 ? 'rgba(99,102,241,0.4)' : 'var(--border)'}`, transition: 'all 0.15s' }}
-          >
+          <div onClick={() => setMentionedIds([])}
+            style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '3px 10px', borderRadius: 20, fontSize: 12, cursor: 'pointer', background: mentionedIds.length === 0 ? 'var(--accent-glow)' : 'var(--bg-input)', color: mentionedIds.length === 0 ? 'var(--accent-hover)' : 'var(--text-muted)', border: `1px solid ${mentionedIds.length === 0 ? 'rgba(99,102,241,0.4)' : 'var(--border)'}`, transition: 'all 0.15s' }}>
             👥 所有人
           </div>
           {aiMembers.filter((m) => selectedAIIds.includes(m.id) || selectedAIIds.includes(`${m.id}:user`)).map((m) => {
@@ -237,8 +255,7 @@ export default function ChatArea() {
                   if (isSelected) setMentionedIds(mentionedIds.filter(id => id !== m.id))
                   else setMentionedIds([...mentionedIds, m.id])
                 }}
-                style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '3px 10px', borderRadius: 20, fontSize: 12, cursor: 'pointer', background: isSelected ? 'rgba(99,102,241,0.15)' : 'var(--bg-input)', color: isSelected ? 'var(--accent-hover)' : 'var(--text-secondary)', border: `1px solid ${isSelected ? 'rgba(99,102,241,0.4)' : 'var(--border)'}`, transition: 'all 0.15s' }}
-              >
+                style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '3px 10px', borderRadius: 20, fontSize: 12, cursor: 'pointer', background: isSelected ? 'rgba(99,102,241,0.15)' : 'var(--bg-input)', color: isSelected ? 'var(--accent-hover)' : 'var(--text-secondary)', border: `1px solid ${isSelected ? 'rgba(99,102,241,0.4)' : 'var(--border)'}`, transition: 'all 0.15s' }}>
                 <span>{m.custom_avatar || m.avatar}</span>
                 {m.custom_name || m.name}
                 {isSelected && <span style={{ fontSize: 10, marginLeft: 2 }}>✓</span>}
@@ -249,7 +266,7 @@ export default function ChatArea() {
 
         {showMentionMenu && (
           <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 6, marginBottom: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.3)' }}>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '2px 8px 6px', fontWeight: 500 }}>@ 提及（只有被@的成员会回复）</div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '2px 8px 6px', fontWeight: 500 }}>@ 提及</div>
             <div onClick={() => handleMention(null)}
               style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 6, cursor: 'pointer', fontSize: 13 }}
               onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-hover)')}
@@ -272,22 +289,28 @@ export default function ChatArea() {
           <TextareaAutosize
             ref={inputRef}
             className="input-box"
-            placeholder="发送消息... (Ctrl+Enter 发送，Enter 换行，@ 提及成员)"
+            placeholder={isDiscussionRunning
+              ? '讨论进行中，可点右上角「停止讨论」...'
+              : isDiscussionMode
+                ? '发送消息启动讨论... (Ctrl+Enter 发送)'
+                : '发送消息... (Ctrl+Enter 发送，Enter 换行，@ 提及成员)'}
             value={input}
             onChange={(e) => handleInputChange(e.target.value)}
             onKeyDown={handleKeyDown}
             minRows={1}
             maxRows={6}
-            disabled={isSending}
+            disabled={isSending || isDiscussionRunning}
           />
           <button className="btn btn-primary" onClick={handleSend}
-            disabled={!input.trim() || isSending}
+            disabled={!input.trim() || isSending || isDiscussionRunning}
             style={{ padding: '10px 16px', flexShrink: 0 }} title="发送 (Ctrl+Enter)">
             {isSending ? <span className="spinner" /> : <Send size={16} />}
           </button>
         </div>
         <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6, textAlign: 'right' }}>
-          Ctrl+Enter 发送 · Enter 换行 · @ 提及成员
+          {isDiscussionRunning
+            ? '讨论进行中 · 点右上角「停止讨论」可随时停止'
+            : 'Ctrl+Enter 发送 · Enter 换行 · @ 提及成员'}
         </div>
       </div>
 
@@ -302,9 +325,9 @@ function MessageRow({ message }: { message: ChatMessage }) {
   if (message.metadata?.thinking) {
     return (
       <div className="message-row ai">
-        <div className="ai-avatar">🤔</div>
+        <div className="ai-avatar">{message.sender_avatar || '🤔'}</div>
         <div>
-          <div className="role-label">AI 思考中...</div>
+          <div className="role-label">{message.sender_name || 'AI'} 思考中...</div>
           <div className="bubble ai"><div className="thinking-dots"><span /><span /><span /></div></div>
         </div>
       </div>
@@ -379,7 +402,6 @@ function MemberDropdown({ members, selected, onToggle, onClose, onManage }: {
   )
 }
 
-// ModeDropdown 现在接收动态模式列表，不再使用硬编码的 MODE_INFO
 function ModeDropdown({ modes, activeMode, onSelect, onClose }: {
   modes: DynamicMode[]; activeMode: string; onSelect: (mode: string) => void; onClose: () => void
 }) {
@@ -388,9 +410,7 @@ function ModeDropdown({ modes, activeMode, onSelect, onClose }: {
       <div style={{ position: 'fixed', inset: 0, zIndex: 49 }} onClick={onClose} />
       <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 6, width: 230, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 12, padding: 8, zIndex: 50, boxShadow: '0 8px 24px rgba(0,0,0,0.4)', maxHeight: 400, overflowY: 'auto' }}>
         <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 8px 8px', fontWeight: 500 }}>聊天模式</div>
-        {modes.length === 0 && (
-          <div style={{ padding: '8px', fontSize: 12, color: 'var(--text-muted)' }}>暂无可用模式</div>
-        )}
+        {modes.length === 0 && <div style={{ padding: '8px', fontSize: 12, color: 'var(--text-muted)' }}>暂无可用模式</div>}
         {modes.map((mode) => {
           const style = BUILTIN_MODE_STYLE[mode.mode_key] || { icon: MessageCircle, color: '#818cf8' }
           const Icon = style.icon
