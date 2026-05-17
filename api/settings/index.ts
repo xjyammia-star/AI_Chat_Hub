@@ -1,6 +1,6 @@
 // api/settings/index.ts
-// 设置 API — 合并 modes 和 profile（节省 Serverless Function 配额）
-// 路由：/api/settings?type=modes 或 /api/settings?type=profile
+// 设置 API — 合并 modes、profile、reputation（节省 Serverless Function 配额）
+// 路由：/api/settings?type=modes 或 ?type=profile 或 ?type=reputation
 
 import type { VercelRequest, VercelResponse } from '@vercel/node'
 import { requireAuth } from '../_lib/middleware.js'
@@ -16,9 +16,7 @@ export default requireAuth(async (req, res, authUser): Promise<any> => {
       const modes = await sql`SELECT * FROM chat_modes ORDER BY created_at`
       return res.json({ modes })
     }
-
     if (authUser.role !== 'admin') return res.status(403).json({ error: '需要管理员权限' })
-
     if (req.method === 'POST') {
       const { mode_key, mode_name, description, config } = req.body
       if (!mode_key || !mode_name) return res.status(400).json({ error: '模式标识和名称不能为空' })
@@ -31,7 +29,6 @@ export default requireAuth(async (req, res, authUser): Promise<any> => {
       `
       return res.status(201).json({ mode })
     }
-
     if (req.method === 'PUT') {
       const { id, mode_name, description, config, is_enabled } = req.body
       if (mode_name !== undefined) await sql`UPDATE chat_modes SET mode_name = ${mode_name}, updated_at = NOW() WHERE id = ${id}`
@@ -40,10 +37,8 @@ export default requireAuth(async (req, res, authUser): Promise<any> => {
       if (is_enabled !== undefined) await sql`UPDATE chat_modes SET is_enabled = ${is_enabled}, updated_at = NOW() WHERE id = ${id}`
       return res.json({ success: true })
     }
-
     if (req.method === 'DELETE') {
       const { id } = req.body
-      // 【修改】允许删除任何模式，包括内置模式，由用户自己决定
       await sql`DELETE FROM chat_modes WHERE id = ${id}`
       return res.json({ success: true })
     }
@@ -67,5 +62,21 @@ export default requireAuth(async (req, res, authUser): Promise<any> => {
     return res.json({ success: true })
   }
 
-  return res.status(400).json({ error: '请指定 type 参数：modes 或 profile' })
+  // ==================== REPUTATION (GET) ====================
+  // GET /api/settings?type=reputation — 获取当前用户所有 AI 的积分
+  if (type === 'reputation') {
+    if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' })
+    const rows = await sql`
+      SELECT ai_member_id, score
+      FROM ai_reputation
+      WHERE user_id = ${authUser.id}
+    `
+    const map: Record<string, number> = {}
+    for (const row of rows) {
+      map[row.ai_member_id as string] = row.score as number
+    }
+    return res.json({ scores: map })
+  }
+
+  return res.status(400).json({ error: '请指定 type 参数：modes、profile 或 reputation' })
 })
