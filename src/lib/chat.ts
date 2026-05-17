@@ -23,7 +23,7 @@ async function callOllamaLocal(params: {
   return data.message?.content || ''
 }
 
-// 讨论模式状态（全局，跨组件共享）
+// 讨论模式全局状态
 export const discussionState = {
   isRunning: false,
   shouldStop: false,
@@ -201,7 +201,6 @@ async function handleSSESend(
             })
 
           } else if (eventType === 'discussion_start') {
-            // 收到讨论配置，保存起来，等 done 之后开始轮询
             discussionConfig = data
 
           } else if (eventType === 'local_ai_calls') {
@@ -218,29 +217,35 @@ async function handleSSESend(
                 messages: state.messages.filter((m: ChatMessage) => !remainingIds.includes(m.id as string)),
               }))
             }
-            if (!discussionConfig) {
+
+            if (discussionConfig) {
+              // 讨论模式：在 done 事件里直接启动轮询，用 setTimeout 避免阻塞当前帧
+              const configToUse = discussionConfig
+              discussionConfig = null
+              setTimeout(() => {
+                runDiscussionPolling(configToUse, currentSession, set, get)
+              }, 100)
+            } else {
               set({ isSending: false })
               get().loadSessions()
             }
           }
-        } catch { }
+        } catch (e) {
+          console.error('SSE parse error:', e)
+        }
       }
     }
   } catch (e) {
     console.error('SSE read error:', e)
   } finally {
     reader.releaseLock()
-    if (!discussionConfig) {
+    // finally 只清理非讨论模式的状态，讨论模式由 runDiscussionPolling 自己管理
+    if (!discussionState.isRunning) {
       set((state: any) => ({
         isSending: false,
         messages: state.messages.filter((m: ChatMessage) => !m.metadata?.thinking),
       }))
     }
-  }
-
-  // 如果是讨论模式，启动前端轮询
-  if (discussionConfig) {
-    await runDiscussionPolling(discussionConfig, currentSession, set, get)
   }
 }
 
@@ -270,8 +275,7 @@ async function runDiscussionPolling(
     messages: [...state.messages, {
       id: `round-1-${Date.now()}`,
       session_id: currentSession.id,
-      sender_type: 'system',
-      sender_name: 'system',
+      sender_type: 'system', sender_name: 'system',
       content: '── 第 1 轮 ──',
       created_at: new Date().toISOString(),
     }]
@@ -279,20 +283,14 @@ async function runDiscussionPolling(
 
   try {
     while (currentRound <= total_rounds && !discussionState.shouldStop) {
-      // 显示思考中气泡
       const ai_id = ai_ids[currentAiIndex]
       const thinkingId = `thinking-discussion-${ai_id}-${Date.now()}`
 
-      // 先获取AI名字用于显示（从现有消息或临时显示）
       set((state: any) => ({
         messages: [...state.messages, {
-          id: thinkingId,
-          session_id: currentSession.id,
-          sender_type: 'ai',
-          sender_name: '...',
-          sender_avatar: '🤔',
-          content: '...',
-          metadata: { thinking: true },
+          id: thinkingId, session_id: currentSession.id,
+          sender_type: 'ai', sender_name: '思考中...', sender_avatar: '🤔',
+          content: '...', metadata: { thinking: true },
           created_at: new Date().toISOString(),
         }]
       }))
@@ -330,59 +328,57 @@ async function runDiscussionPolling(
         set((state: any) => {
           const filtered = state.messages.filter((m: ChatMessage) => m.id !== thinkingId)
           if (data.message) {
-            // 把发言加入记录
             speeches.push({ name: data.message.sender_name, content: data.message.content })
             return { messages: [...filtered, data.message] }
           }
           return { messages: filtered }
         })
 
+        if (discussionState.shouldStop) break
+
         // 移动到下一步
         if (data.next) {
           const wasRoundEnd = data.next.is_round_start
-          currentAiIndex = data.next.ai_index
           const newRound = data.next.round
+          currentAiIndex = data.next.ai_index
+          currentRound = newRound
 
-          // 如果进入新一轮，显示轮次标记
+          // 新一轮标记
           if (wasRoundEnd && newRound <= total_rounds && !discussionState.shouldStop) {
             set((state: any) => ({
               messages: [...state.messages, {
                 id: `round-${newRound}-${Date.now()}`,
                 session_id: currentSession.id,
-                sender_type: 'system',
-                sender_name: 'system',
+                sender_type: 'system', sender_name: 'system',
                 content: `── 第 ${newRound} 轮 ──`,
                 created_at: new Date().toISOString(),
               }]
             }))
           }
-          currentRound = newRound
         } else {
-          // 没有 next 说明讨论结束
           break
         }
 
         if (data.is_last_step) break
 
       } catch (err) {
-        // 某个AI出错，移除思考气泡继续
+        console.error('Discussion step error:', err)
+        // 出错跳过这个AI
         set((state: any) => ({
           messages: state.messages.filter((m: ChatMessage) => m.id !== thinkingId)
         }))
-        // 跳到下一个AI
         currentAiIndex = (currentAiIndex + 1) % ai_ids.length
         if (currentAiIndex === 0) currentRound++
       }
     }
 
-    // 生成总结
+    // 总结
     if (enable_summary && !discussionState.shouldStop && speeches.length > 0) {
       const summaryAiId = summary_ai_id || ai_ids[0]
       const thinkingId = `thinking-summary-${Date.now()}`
       set((state: any) => ({
         messages: [...state.messages, {
-          id: thinkingId,
-          session_id: currentSession.id,
+          id: thinkingId, session_id: currentSession.id,
           sender_type: 'ai', sender_name: '总结中...', sender_avatar: '📝',
           content: '...', metadata: { thinking: true },
           created_at: new Date().toISOString(),
@@ -407,7 +403,7 @@ async function runDiscussionPolling(
               speeches,
               topic,
               summary_prompt,
-              max_tokens: (max_tokens || 600) * 1.5,
+              max_tokens: Math.round((max_tokens || 600) * 1.5),
             },
           }),
         })
@@ -425,14 +421,14 @@ async function runDiscussionPolling(
 
   } finally {
     discussionState.isRunning = false
+    const wasStopped = discussionState.shouldStop
     discussionState.shouldStop = false
 
-    // 讨论结束提示
     const endMsg: ChatMessage = {
       id: `discussion-end-${Date.now()}`,
       session_id: currentSession.id,
       sender_type: 'system', sender_name: 'system',
-      content: discussionState.shouldStop ? '⏹ 讨论已停止' : '✅ 讨论结束',
+      content: wasStopped ? '⏹ 讨论已停止' : '✅ 讨论结束',
       created_at: new Date().toISOString(),
     }
     set((state: any) => ({
