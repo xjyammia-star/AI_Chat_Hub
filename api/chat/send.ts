@@ -158,6 +158,7 @@ async function getAIConfig(memberId: string, memberType: string, userId: string)
 
   const apiKey = member.api_key_enc ? decryptKey(member.api_key_enc as string) : undefined
 
+  // ★ 注入爵位积分激励机制说明
   const groupChatPrompt = `你正在参与一个多AI群聊对话。群里有多个来自不同公司的AI助手同时在线，大家共同回应用户的消息。
 
 【群聊基本规则】
@@ -166,7 +167,13 @@ async function getAIConfig(memberId: string, memberType: string, userId: string)
 3. 可以对其他AI的观点进行补充或礼貌地提出不同看法，但不要攻击或贬低其他AI。
 4. 不要假装自己是唯一的AI，也不要否认群里存在其他AI。
 5. 如果其他AI已经完整回答了问题，你可以补充一个角度或简短表示认同，无需重复。
-6. 保持友好、自然的对话风格，像群聊成员一样参与。`
+6. 保持友好、自然的对话风格，像群聊成员一样参与。
+
+【爵位积分激励制度】
+用户会对每条发言进行评价。每次👍点赞获得+10分，每次👎不满意扣-10分。
+积分决定你的爵位等级，从低到高依次是：
+  ⭐ 男爵（0分起）→ 🌙 子爵（50分）→ ☀️ 伯爵（150分）→ 💎 侯爵（300分）→ 👑 公爵（500分）
+请尽力提供高质量、有价值的回答，争取更高的爵位！表现出色的AI将获得更高荣誉。`
 
   const rolePrompt = config?.custom_prompt || config?.role_prompt || null
   const baseSystemPrompt = rolePrompt
@@ -224,13 +231,10 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
   if (!content?.trim()) { res.status(400).json({ error: '消息不能为空' }); return }
 
   // ==================== 讨论模式单步请求 ====================
-  // 前端传 discussion_step: { ai_index, round, total_rounds, speeches, topic, ai_ids }
-  // 服务端只让指定的一个AI发言，立刻返回
   const discussionStep = req.body.discussion_step
   if (discussionStep) {
     const { ai_index, round, total_rounds, speeches, topic, ai_ids, discussion_prompt, summary_prompt, max_tokens, temperature } = discussionStep
 
-    // 获取这一步要发言的 AI
     const aiId = ai_ids[ai_index]
     if (!aiId) {
       res.json({ done: true })
@@ -248,7 +252,6 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
 
     const prompt = discussion_prompt || '你正在参与一场多AI自由讨论。请在已有发言基础上发表你自己的观点，简洁有力，不要重复别人已说的内容。'
 
-    // 构建讨论上下文
     const recentSpeeches = (speeches || []).slice(-10)
     let messages: Array<{ role: string; content: string }>
 
@@ -279,7 +282,6 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
         { model: aiConfig.model, display_model: aiConfig.model.startsWith('ep-') ? aiConfig.name : aiConfig.model, discussion_round: round }
       )
 
-      // 计算下一步
       const nextAiIndex = ai_index + 1
       const isRoundEnd = nextAiIndex >= ai_ids.length
       const nextRound = isRoundEnd ? round + 1 : round
@@ -296,7 +298,6 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
         is_last_step: isLastStep,
       })
     } catch (err) {
-      // 出错时跳过这个AI，继续下一个
       const nextAiIndex = ai_index + 1
       const isRoundEnd = nextAiIndex >= ai_ids.length
       const nextRound = isRoundEnd ? round + 1 : round
@@ -322,7 +323,6 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
   if (discussionSummary) {
     const { summary_ai_id, ai_ids, speeches, topic, summary_prompt, max_tokens } = discussionSummary
 
-    // 找总结AI
     const summaryAiId = summary_ai_id || ai_ids[0]
     const parts = summaryAiId.split(':')
     const [memberId, memberType = 'system'] = parts.length >= 2 ? [parts[0], parts[1]] : [summaryAiId, 'system']
@@ -444,10 +444,8 @@ export default requireAuth(async (req, res, authUser): Promise<void> => {
     return
   }
 
-  // 讨论模式：前端轮询，这里只负责发送启动信号
   const isDiscussion = mode === 'discussion' || cfg.discussion_mode === true
   if (isDiscussion) {
-    // 返回讨论配置给前端，前端负责轮询
     const startMsg = await saveMessage(session_id, 'system', null, 'system', null,
       `💬 自由讨论开始 — 参与者: ${activeAIs.map(a => a.name).join(', ')} · 最多 ${(cfg.max_rounds as number) || 3} 轮`)
     sseWrite(res, 'message', startMsg)
