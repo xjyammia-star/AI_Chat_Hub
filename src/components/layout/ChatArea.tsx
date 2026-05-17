@@ -149,7 +149,7 @@ export default function ChatArea() {
   const activeModeInfo = modes.find(m => m.mode_key === activeMode)
   const activeModeStyle = BUILTIN_MODE_STYLE[activeMode] || { icon: MessageCircle, color: '#818cf8' }
   const ActiveModeIcon = activeModeStyle.icon
-  const isDiscussionMode = activeMode === 'discussion' || activeModeInfo?.config?.discussion_mode === true
+  const isDiscussionMode = (activeMode as string) === 'discussion' || activeModeInfo?.config?.discussion_mode === true
 
   if (!currentSession) {
     return (
