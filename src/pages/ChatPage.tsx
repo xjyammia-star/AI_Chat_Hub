@@ -1,14 +1,20 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useChatStore } from '@/lib/chat'
 import Sidebar from '@/components/layout/Sidebar'
 import ChatArea from '@/components/layout/ChatArea'
 
 export default function ChatPage() {
   const loadSessions = useChatStore((s) => s.loadSessions)
+  const loadReputationScores = useChatStore((s) => s.loadReputationScores)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
 
   useEffect(() => {
     loadSessions()
-  }, [])  // 只在挂载时执行一次
+    loadReputationScores()
+  }, [])
+
+  // 判断是否手机（用于决定侧边栏行为）
+  const isMobile = typeof window !== 'undefined' && window.innerWidth < 768
 
   return (
     <div
@@ -22,8 +28,13 @@ export default function ChatPage() {
       }}
     >
       <div className="app-window">
-        <Sidebar />
-        <ChatArea />
+        <Sidebar
+          isOpen={isMobile ? sidebarOpen : true}
+          onClose={isMobile ? () => setSidebarOpen(false) : undefined}
+        />
+        <ChatArea
+          onMenuClick={() => setSidebarOpen(true)}
+        />
       </div>
     </div>
   )
